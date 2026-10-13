@@ -5,6 +5,13 @@ QEMU README
 QEMU is a generic and open source machine & userspace emulator and
 virtualizer.
 
+This fork also contains **Megas**, a small native controller for running a
+virtual computer and sharing its live state with local coding agents. Megas is
+a fork-specific companion tool, not part of upstream QEMU. See the
+`Megas setup guide <tools/megas/docs/setup.md>`_ and
+`agent integration guide <tools/megas/docs/harnesses.md>`_. No public Megas
+release is available from this source tree yet.
+
 QEMU is capable of emulating a complete machine in software without any
 need for hardware virtualization support. By using dynamic translation,
 it achieves very good performance. QEMU can also integrate with the Xen

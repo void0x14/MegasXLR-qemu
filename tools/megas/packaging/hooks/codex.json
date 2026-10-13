@@ -1,0 +1,9 @@
+{
+  "description": "Add current Megas VM state around local agent actions.",
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "\"@MEGAS@\" hook SessionStart", "timeout": 3, "statusMessage": "Reading Megas VM state"}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "\"@MEGAS@\" hook UserPromptSubmit", "timeout": 3, "statusMessage": "Reading Megas VM state"}]}],
+    "PreToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": "\"@MEGAS@\" hook PreToolUse", "timeout": 3, "statusMessage": "Reading Megas VM state"}]}],
+    "PostToolUse": [{"matcher": ".*", "hooks": [{"type": "command", "command": "\"@MEGAS@\" hook PostToolUse", "timeout": 3, "statusMessage": "Reading Megas VM state"}]}]
+  }
+}

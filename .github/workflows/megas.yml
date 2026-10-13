@@ -1,0 +1,89 @@
+name: Megas native controller
+on:
+  push:
+    paths: ['tools/megas/**', '.github/workflows/megas.yml']
+  pull_request:
+    paths: ['tools/megas/**', '.github/workflows/megas.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: megas-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install build-runner dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libx11-dev qemu-system-x86 qemu-utils tesseract-ocr xvfb
+      - name: Record imported distribution QEMU runtime
+        run: |
+          qemu-system-x86_64 --version
+          qemu-img --version
+          tesseract --version
+          dpkg-query -W qemu-system-x86 qemu-utils
+      - name: Build native and headless controllers
+        run: make -C tools/megas all headless
+      - name: Run native protocol and real QEMU checks
+        run: make -C tools/megas test
+      - name: Build complete private-runtime bundle
+        run: make -C tools/megas bundle
+      - name: Upload tested Linux bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-linux-x86_64
+          path: |
+            tools/megas/build/bundle.tar.gz
+            tools/megas/build/bundle.tar.gz.sha256
+          if-no-files-found: error
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Prepare native Windows build runner
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-qemu
+            mingw-w64-ucrt-x86_64-tesseract-ocr
+            mingw-w64-ucrt-x86_64-tesseract-data-eng
+      - name: Build native Windows executables
+        run: make -C tools/megas CC=gcc all headless
+      - name: Record imported MSYS2 QEMU runtime
+        run: |
+          qemu-system-x86_64 --version
+          qemu-img --version
+          tesseract --version
+          pacman -Qi mingw-w64-ucrt-x86_64-qemu
+          pacman -Qi mingw-w64-ucrt-x86_64-tesseract-ocr mingw-w64-ucrt-x86_64-tesseract-data-eng
+      - name: Run Windows adapter, ISO and real QEMU checks
+        run: make -C tools/megas CC=gcc test
+      - name: Build complete Windows bundle
+        run: make -C tools/megas CC=gcc bundle
+      - name: Parse native installer scripts
+        shell: powershell
+        run: |
+          $files = @('tools/megas/packaging/install.ps1', 'tools/megas/packaging/bootstrap.ps1.in', 'tools/megas/guest/windows-policy.ps1')
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+          }
+      - name: Upload tested Windows bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-windows-x86_64
+          path: |
+            tools/megas/build/bundle.zip
+            tools/megas/build/bundle.zip.sha256
+          if-no-files-found: error
