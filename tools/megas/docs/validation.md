@@ -78,10 +78,12 @@ behavior or runtime job cleanup.
 
 This live suite uses a BIOS fixture. It does not validate an arbitrary guest's
 password or screen-lock policy, a full Linux desktop, or playable Doom. The
-controller RSS, the OCR child RSS, QEMU RSS and guest RAM are separate costs;
-the controller's sub-100-MiB observation does not mean the full VM system uses
-less than 100 MiB. The 64 MiB guest RAM is in addition to QEMU and controller
-memory.
+controller and OCR child RSS are additional process costs. QEMU's observed RSS
+includes its resident guest pages plus emulator overhead. The configured 64
+MiB guest RAM is a capacity setting, not another 64 MiB to add to QEMU RSS; the
+resident amount depends on pages touched by the guest. The controller's
+sub-100-MiB observation applies only to the control layer and is not a total
+memory claim for the VM system.
 
 The Linux GUI was freshly linked and visually checked in a 1360×900 Xvfb
 session with `LANG=tr_TR.UTF-8` and `LC_ALL=C.UTF-8`. Turkish labels were

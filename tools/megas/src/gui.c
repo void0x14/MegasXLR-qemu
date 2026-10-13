@@ -38,7 +38,7 @@ typedef struct {
     MgEngine *engine;
     struct nk_context *ctx;
     struct nk_rect viewport, picture;
-    int width, height, alive, focused, tab, settings_tab;
+    int width, height, alive, focused, tab, settings_tab, advanced_settings;
     int ram, vm_w, vm_h, passwordless, disk_gb, create_dialog, creating_disk;
     int password_field_visible;
     float row;
@@ -661,9 +661,22 @@ static void gui_settings(MgGui *ui)
     gui_field(ui, tr("Kurulum diski (isteğe bağlı)", "Installer image (optional)"),
         tr("Yeni işletim sistemi kurmak veya bir kurtarma ortamı açmak için ISO dosyası.",
            "An ISO file to install an operating system or boot a rescue environment."), ui->iso, 2);
-    gui_field(ui, tr("VM motoru", "VM engine"),
-        tr("QEMU, bilgisayarı çalıştıran programdır. Genellikle bu alanı değiştirmeye gerek yoktur.",
-           "QEMU runs the virtual computer. Usually this field needs no changes."), ui->qemu, 3);
+    nk_layout_row_dynamic(ctx, ui->row, 1);
+    if (nk_button_label(ctx, ui->advanced_settings ?
+            tr("Gelişmiş seçenekleri gizle", "Hide advanced options") :
+            tr("Gelişmiş / geliştirici seçenekleri", "Advanced / developer options")))
+        ui->advanced_settings = !ui->advanced_settings;
+    if (nk_widget_is_hovered(ctx))
+        nk_tooltip(ctx, tr("Standart kullanımda bu seçenekleri değiştirmeniz gerekmez.",
+                           "These options do not need to change for normal use."));
+    if (ui->advanced_settings) {
+        nk_layout_row_dynamic(ctx, ui->row*2, 1);
+        nk_label_wrap(ctx, tr("Megas paketi sanal bilgisayar programını otomatik seçer. Bu alanı yalnızca kendi kopyanızı kullanacaksanız değiştirin.",
+                             "The Megas package selects the virtual-machine program automatically. Change this only to use your own copy."));
+        gui_field(ui, tr("VM programı", "VM executable"),
+            tr("Normal kullanımda Megas'ın seçtiği programı kullanın.",
+               "Use the program selected by Megas for normal use."), ui->qemu, 3);
+    }
     nk_layout_row_dynamic(ctx, ui->row, 1);
     nk_property_int(ctx, tr("VM belleği (MB)", "VM memory (MB)"), 64, &ui->ram, 32768, 64, 16);
     if (nk_widget_is_hovered(ctx)) nk_tooltip(ctx, tr("Bu bellek VM'e aittir. Kontrol panelinin belleğinden ayrıdır.", "This memory belongs to the VM, separately from the controller."));

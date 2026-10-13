@@ -322,9 +322,19 @@ def main():
                  'params': {'name': 'megas_vm', 'arguments': {'action': 'resize', 'width': 0, 'height': 0}}},
             ]
             packet = ''.join(json.dumps(message) + '\n' for message in messages)
+            ocr_started_at = time.monotonic()
+            adapter_ocr_observations = []
+            adapter_run_observations = []
+            report['measurements']['ocr_adapter'] = adapter_ocr_observations
+            report['measurements']['ocr_adapter_runs'] = adapter_run_observations
             for text_only in (False, True):
+                adapter_run_started = time.monotonic()
                 result = subprocess.run(common + ['agent'] + (['--text-only'] if text_only else []),
                                         input=packet, capture_output=True, text=True, timeout=10)
+                adapter_run_observations.append({
+                    'text_only': text_only,
+                    'elapsed_seconds': round(time.monotonic() - adapter_run_started, 3),
+                })
                 require(result.returncode == 0, f'Adapter exited: {result.stderr}')
                 replies = [json.loads(line) for line in result.stdout.splitlines()]
                 require(len(replies) == 4, 'Adapter response count invalid')
@@ -346,11 +356,18 @@ def main():
                                 'Text-only adapter omitted its OCR result or honest limitation')
                         ocr_result = content[1]['text']
                         if tesseract:
-                            require(ocr_result.startswith('Tesseract OCR for live image generation '),
-                                    'Installed Tesseract did not return a real OCR result')
+                            require(ocr_result.startswith('Tesseract OCR for live image generation ') or
+                                    ocr_result.startswith('OCR is still running or unavailable within the 1.5-second adapter wait;'),
+                                    f'Installed Tesseract returned neither OCR nor an honest pending result: {ocr_result!r}')
                         else:
                             require('OCR' in ocr_result,
                                     'Text-only adapter did not report a real OCR limitation')
+                        adapter_ocr_observations.append({
+                            'request_id': tool_reply['id'],
+                            'source_image_generation': state.get('image_generation'),
+                            'source_ocr_status': state.get('ocr', {}).get('status'),
+                            'result': ocr_result,
+                        })
                     else:
                         require(len(images) == 1 and images[0]['mimeType'] == 'image/png',
                                 'Vision adapter omitted current PNG image from a tool response')
@@ -359,19 +376,81 @@ def main():
                         require(png_pixels(image_file)['pixel_sha256'] == hash_b,
                                 'Adapter image differs from actual live guest framebuffer')
             if tesseract:
+                ocr_deadline = ocr_started_at + 10
                 current = send({'action': 'status'})
                 ocr = current.get('ocr', {})
+                report['measurements']['ocr_owner_status'] = {
+                    'status': ocr.get('status'), 'message': ocr.get('message'),
+                    'generation': ocr.get('generation'),
+                    'image_generation': current.get('image_generation'),
+                    'pid': ocr.get('pid'), 'peak_memory_bytes': ocr.get('peak_memory_bytes'),
+                }
+                while ocr.get('status') == 'running' and time.monotonic() < ocr_deadline:
+                    time.sleep(0.1)
+                    current = send({'action': 'status'})
+                    ocr = current.get('ocr', {})
+                    report['measurements']['ocr_owner_status'] = {
+                        'status': ocr.get('status'), 'message': ocr.get('message'),
+                        'generation': ocr.get('generation'),
+                        'image_generation': current.get('image_generation'),
+                        'pid': ocr.get('pid'), 'peak_memory_bytes': ocr.get('peak_memory_bytes'),
+                    }
                 require(ocr.get('status') == 'complete',
-                        f'Tesseract did not complete: {ocr.get("status")}: {ocr.get("message")}')
+                        f'Tesseract did not complete within its bounded wait: status={ocr.get("status")!r}, '
+                        f'message={ocr.get("message")!r}, generation={ocr.get("generation")!r}, '
+                        f'image_generation={current.get("image_generation")!r}, '
+                        f'peak_memory_bytes={ocr.get("peak_memory_bytes")!r}')
                 require(ocr.get('generation') == current.get('image_generation'),
                         'OCR result does not match the current image generation')
                 peak = ocr.get('peak_memory_bytes')
                 require(isinstance(peak, int) and 0 < peak <= 48 * 1024 * 1024,
                         f'Observed OCR peak memory is missing or exceeds 48 MiB: {peak!r}')
                 require(bool(ocr.get('text')), 'Completed OCR result contains no text')
+                verify_packet = ''.join(json.dumps(message) + '\n' for message in (
+                    {'jsonrpc': '2.0', 'id': 11, 'method': 'initialize',
+                     'params': {'protocolVersion': '2025-06-18', 'capabilities': {},
+                                'clientInfo': {'name': 'live-test', 'version': '1'}}},
+                    {'jsonrpc': '2.0', 'id': 12, 'method': 'tools/call',
+                     'params': {'name': 'megas_vm', 'arguments': {'action': 'status'}}},
+                ))
+                verified = subprocess.run(common + ['agent', '--text-only'], input=verify_packet,
+                                           capture_output=True, text=True, timeout=10)
+                require(verified.returncode == 0, f'Verification adapter exited: {verified.stderr}')
+                verified_replies = [json.loads(line) for line in verified.stdout.splitlines()]
+                require(len(verified_replies) == 2, 'Verification adapter response count invalid')
+                verified_content = verified_replies[1]['result']['content']
+                require(verified_content and verified_content[0]['type'] == 'text',
+                        'Verification adapter omitted its owner status')
+                verified_state = json.loads(verified_content[0]['text'])
+                require(verified_state.get('image_generation') ==
+                        verified_state.get('state', {}).get('frame_generation'),
+                        'Verification adapter state does not identify the current image generation')
+                require(verified_state.get('ocr', {}).get('status') == 'complete' and
+                        verified_state['ocr'].get('generation') == verified_state.get('image_generation'),
+                        'Verification adapter owner status does not contain current completed OCR')
+                verified_text = (verified_content[1].get('text', '')
+                                 if len(verified_content) >= 2 and verified_content[1]['type'] == 'text'
+                                 else '')
+                ocr_prefix = 'Tesseract OCR for live image generation '
+                require(verified_text.startswith(ocr_prefix),
+                        f'Completed Tesseract result was not returned by text-only adapter: '
+                        f'{verified_text or verified_content!r}')
+                adapter_generation = verified_text[len(ocr_prefix):].split(':', 1)[0]
+                require(adapter_generation.isdecimal() and
+                        int(adapter_generation) == verified_state.get('image_generation'),
+                        f'Text-only adapter OCR generation does not match its image: '
+                        f'{adapter_generation!r} vs {verified_state.get("image_generation")!r}')
+                require(bool(verified_text.split('\n', 1)[1].strip()) if '\n' in verified_text else False,
+                        'Text-only adapter returned an empty OCR body after completion')
+                report['measurements']['ocr_adapter_verified'] = {
+                    'image_generation': verified_state.get('image_generation'),
+                    'result': verified_text,
+                }
                 report['measurements']['ocr'] = {
                     'status': ocr['status'], 'generation': ocr['generation'],
                     'peak_memory_bytes': peak, 'text_bytes': len(ocr['text'].encode('utf-8')),
+                    'complete_observed_seconds_after_first_adapter_request':
+                        round(time.monotonic() - ocr_started_at, 3),
                 }
                 passed('real_tesseract_ocr_matches_live_image_and_stays_under_48_mib',
                        generation=ocr['generation'], peak_memory_bytes=peak)

@@ -64,7 +64,7 @@ test-engine test-guest:
 test: test-rfb test-platform test-seed test-live test-agent
 endif
 test-smoke test-live: headless
-	$(PYTHON) tests/test_live.py "$(BUILD)/megas-headless$(EXE)"
+	$(PYTHON) tests/test_live.py "$(BUILD)/megas-headless$(EXE)" --report "$(BUILD)/live-report.json"
 test-agent: headless
 	$(PYTHON) tests/test_agent.py "$(BUILD)/megas-headless$(EXE)"
 bundle: all headless

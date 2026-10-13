@@ -209,7 +209,7 @@ static void verify_argv_is_literal(const char *exe, const char *log)
     char *args[5];
     MgpProcess process;
     FILE *file;
-    size_t bytes;
+    size_t bytes, line_ending = 0;
     unsigned i;
     check(snprintf(expected, sizeof(expected), "%s|%s", quoted, injection) <
           (int)sizeof(expected), "format expected argv output");
@@ -228,9 +228,13 @@ static void verify_argv_is_literal(const char *exe, const char *log)
     check(file != NULL, "read argv probe log");
     bytes = fread(output, 1, sizeof(output) - 1, file);
     fclose(file);
-    check(bytes == strlen(expected) + 1 && output[bytes - 1] == '\n',
+    if (bytes && output[bytes - 1] == '\n') {
+        line_ending = 1;
+        if (bytes > 1 && output[bytes - 2] == '\r') line_ending = 2;
+    }
+    check(line_ending && bytes == strlen(expected) + line_ending,
           "argv probe writes one line with both literal arguments");
-    output[bytes - 1] = 0;
+    output[bytes - line_ending] = 0;
     check(!strcmp(output, expected),
           "argv quoting preserves spaces, quotes, backslashes, and shell metacharacters");
 }
