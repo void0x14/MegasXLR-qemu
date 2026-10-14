@@ -1734,7 +1734,7 @@ VM_START_FAIL();
 e->cfg.width=number_or(j,"width",e->cfg.width);
 e->cfg.height=number_or(j,"height",e->cfg.height);
 
-    if(e->cfg.ram_mb<16||e->cfg.ram_mb>32768||e->cfg.width<320||e->cfg.height<200||e->cfg.width>4096||e->cfg.height>4096||(uint64_t)e->cfg.width*e->cfg.height>4194304){feedback(e,"Choose RAM 16-32768 MB and a screen between 320x200 and 4 million pixels.");
+    if(e->cfg.ram_mb<16||e->cfg.ram_mb>32768||e->cfg.width<320||e->cfg.height<200||e->cfg.width>4096||e->cfg.height>4096||(uint64_t)e->cfg.width*e->cfg.height>9437184){feedback(e,"Choose RAM 16-32768 MB and a screen between 320x200 and 9 million pixels.");
 VM_START_FAIL();
 }
     if(!e->cfg.qemu[0]){feedback(e,"Select a QEMU executable first.");
@@ -2694,7 +2694,7 @@ if(!ok)ok=mg_rfb_pointer(e->display,x,y,0);
             unsigned w=number_or(j,"width",0),height=number_or(j,"height",0);
 uint64_t deadline;
 
-            if(w<320||height<200||w>4096||height>4096||(uint64_t)w*height>4194304){feedback(e,"Choose screen size at least 320x200 and at most 4 million pixels.");
+            if(w<320||height<200||w>4096||height>4096||(uint64_t)w*height>9437184){feedback(e,"Choose screen size at least 320x200 and at most 9 million pixels.");
 goto done;
 }
             e->cfg.width=w;
@@ -2802,16 +2802,20 @@ e->last_rfb_attempt=mgp_now();
 }
     if(e->status.connected&&!e->late_id&&!e->job_active&&mgp_now()-e->last_state>1000)refresh_state(e);
 
+    int listener_ready = (e->listener != MGP_BAD_SOCKET) && (mgp_ready(e->listener, 0, 0) > 0);
     for(i=0;i<4;i++){
         Client *c=&e->clients[i];
 
-        if(c->socket==MGP_BAD_SOCKET){MgpSocket incoming=accept(e->listener,NULL,NULL);
-if(incoming!=MGP_BAD_SOCKET){mgp_nonblock(incoming);
-c->socket=incoming;
-c->used=0;
-c->accepted=mgp_now();
-}else continue;
-}
+        if(c->socket==MGP_BAD_SOCKET && listener_ready){
+            MgpSocket incoming=accept(e->listener,NULL,NULL);
+            if(incoming!=MGP_BAD_SOCKET){
+                mgp_nonblock(incoming);
+                c->socket=incoming;
+                c->used=0;
+                c->accepted=mgp_now();
+                listener_ready = 0;
+            }else continue;
+        }
         if(c->socket!=MGP_BAD_SOCKET){int n=mgp_recv(c->socket,c->request+c->used,sizeof(c->request)-c->used-1);
 char *newline;
 

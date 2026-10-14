@@ -39,7 +39,7 @@ typedef int MgSocket;
 #endif
 
 #define MG_RFB_DIM 4096u
-#define MG_RFB_PIXELS (4u * 1024u * 1024u)
+#define MG_RFB_PIXELS (9u * 1024u * 1024u)
 #define MG_RFB_INPUT 16384u
 #define MG_RFB_OUTPUT 8192u
 #define MG_RFB_TICK_BYTES (2u * 1024u * 1024u)

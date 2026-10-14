@@ -43,7 +43,7 @@ typedef struct {
     MgEngine *engine;
     struct nk_context *ctx;
     struct nk_rect viewport, picture;
-    int width, height, alive, focused, tab, settings_tab, advanced_settings;
+    int width, height, alive, focused, tab, settings_tab, advanced_settings, res_selected;
     int ram, vm_w, vm_h, passwordless, disk_gb, create_dialog, creating_disk;
     int password_field_visible;
     float row;
@@ -86,13 +86,9 @@ typedef struct {
 
 static int gui_turkish(void)
 {
-#ifdef _WIN32
-    if (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_TURKISH) return 1;
-#endif
-    {
-        const char *lang = getenv("LANG");
-        return lang && strncmp(lang, "tr", 2) == 0;
-    }
+    const char *env_lang = getenv("MEGAS_LANG");
+    if (env_lang && !strcmp(env_lang, "en")) return 0;
+    return 1;
 }
 
 static const char *tr(const char *turkish, const char *english)
@@ -162,6 +158,14 @@ static int gui_queue(MgGui *ui, const char *request)
 static void gui_action(MgGui *ui, const char *action)
 {
     char request[128];
+    if (!strcmp(action, "doom")) {
+        const MgStatus *s = mg_engine_status(ui->engine);
+        if (!s->running || !s->connected) {
+            gui_note(ui, tr("Önce Start ile sanal makineyi başlatın! Doom doğrudan misafir işletim sistemi içinde çalışır.",
+                            "Start the VM first! Doom runs inside the guest operating system."));
+            return;
+        }
+    }
     snprintf(request, sizeof(request), "{\"action\":\"%s\"}", action);
     gui_queue(ui, request);
 }
@@ -279,6 +283,14 @@ static void gui_release(MgGui *ui)
     }
     ui->buttons = 0;
     ui->focused = 0;
+#ifdef _WIN32
+    ReleaseCapture();
+#else
+    if (ui->display) {
+        XUngrabPointer(ui->display, CurrentTime);
+        XUngrabKeyboard(ui->display, CurrentTime);
+    }
+#endif
 }
 
 static int gui_inside(struct nk_rect r, int x, int y)
@@ -649,6 +661,49 @@ static void gui_field(MgGui *ui, const char *title, const char *help, char *fiel
     if (nk_widget_is_hovered(ctx)) nk_tooltip(ctx, help);
 }
 
+static const struct {
+    const char *label;
+    int w, h;
+} res_presets[] = {
+    {"Custom", 0, 0},
+    {"1920x1080 (1080p FHD)", 1920, 1080},
+    {"1920x1200 (Laptop)", 1920, 1200},
+    {"1366x768 (Laptop)", 1366, 768},
+    {"1280x720 (720p HD)", 1280, 720},
+    {"1280x800", 1280, 800},
+    {"1024x768", 1024, 768},
+    {"1440x900", 1440, 900},
+    {"1600x900", 1600, 900},
+    {"2560x1440", 2560, 1440},
+    {"3840x2160", 3840, 2160}
+};
+#define RES_PRESETS_COUNT 11
+static const char *res_items_tr = 
+    "Özel / Custom\0"
+    "1920x1080 (1080p FHD)\0"
+    "1920x1200 (Laptop)\0"
+    "1366x768 (Laptop)\0"
+    "1280x720 (720p HD)\0"
+    "1280x800\0"
+    "1024x768\0"
+    "1440x900\0"
+    "1600x900\0"
+    "2560x1440\0"
+    "3840x2160\0\0";
+
+static const char *res_items_en = 
+    "Custom\0"
+    "1920x1080 (1080p FHD)\0"
+    "1920x1200 (Laptop)\0"
+    "1366x768 (Laptop)\0"
+    "1280x720 (720p HD)\0"
+    "1280x800\0"
+    "1024x768\0"
+    "1440x900\0"
+    "1600x900\0"
+    "2560x1440\0"
+    "3840x2160\0\0";
+
 static void gui_settings(MgGui *ui)
 {
     struct nk_context *ctx = ui->ctx;
@@ -685,9 +740,35 @@ static void gui_settings(MgGui *ui)
     nk_layout_row_dynamic(ctx, ui->row, 1);
     nk_property_int(ctx, tr("VM belleği (MB)", "VM memory (MB)"), 64, &ui->ram, 32768, 64, 16);
     if (nk_widget_is_hovered(ctx)) nk_tooltip(ctx, tr("Bu bellek VM'e aittir. Kontrol panelinin belleğinden ayrıdır.", "This memory belongs to the VM, separately from the controller."));
+    nk_layout_row_dynamic(ctx, ui->row, 1);
+    nk_label(ctx, tr("Ekran Çözünürlüğü Seçici", "Resolution Selector"), NK_TEXT_LEFT);
+    {
+        int prev = ui->res_selected;
+        const char *items = gui_turkish() ? res_items_tr : res_items_en;
+        if (ui->res_selected < 0 || ui->res_selected >= RES_PRESETS_COUNT) ui->res_selected = 0;
+        nk_layout_row_dynamic(ctx, ui->row, 1);
+        ui->res_selected = nk_combo_string(ctx, items, ui->res_selected, RES_PRESETS_COUNT, (int)ui->row, nk_vec2(340, 260));
+        if (ui->res_selected != prev && ui->res_selected > 0 && ui->res_selected < RES_PRESETS_COUNT) {
+            ui->vm_w = res_presets[ui->res_selected].w;
+            ui->vm_h = res_presets[ui->res_selected].h;
+        }
+    }
     nk_layout_row_dynamic(ctx, ui->row, 2);
-    nk_property_int(ctx, tr("Genişlik", "Width"), 320, &ui->vm_w, 4096, 16, 8);
-    nk_property_int(ctx, tr("Yükseklik", "Height"), 200, &ui->vm_h, 4096, 16, 8);
+    {
+        int prev_w = ui->vm_w, prev_h = ui->vm_h;
+        nk_property_int(ctx, tr("Genişlik", "Width"), 320, &ui->vm_w, 4096, 16, 8);
+        nk_property_int(ctx, tr("Yükseklik", "Height"), 200, &ui->vm_h, 4096, 16, 8);
+        if (ui->vm_w != prev_w || ui->vm_h != prev_h) {
+            int match = 0, i;
+            for (i = 1; i < RES_PRESETS_COUNT; ++i) {
+                if (res_presets[i].w == ui->vm_w && res_presets[i].h == ui->vm_h) {
+                    match = i;
+                    break;
+                }
+            }
+            ui->res_selected = match;
+        }
+    }
     nk_layout_row_dynamic(ctx, ui->row, 1);
     if (nk_button_label(ctx, tr("Ekran boyutunu uygula", "Apply screen size"))) {
         snprintf(request, sizeof(request), "{\"action\":\"resize\",\"width\":%d,\"height\":%d}", ui->vm_w, ui->vm_h);
@@ -696,7 +777,6 @@ static void gui_settings(MgGui *ui)
     nk_layout_row_dynamic(ctx, ui->row*2, 1);
     nk_label_wrap(ctx, tr("Çalışırken ekran boyutu değişebilir; VM içindeki ekran sürücüsü bunu desteklemelidir.",
                          "Screen size can change while running; the VM's display driver must support it."));
-    nk_layout_row_dynamic(ctx, ui->row, 1);
     nk_layout_row_dynamic(ctx, ui->row, 1);
     nk_label(ctx, tr("Misafir hesabı", "Guest account"), NK_TEXT_LEFT);
     gui_edit(ui, 6, ui->username, sizeof(ui->username));
@@ -925,11 +1005,11 @@ static void gui_draw(MgGui *ui)
     ui->viewport = nk_rect(0,0,0,0);
     if (nk_begin(ctx, "Megas", nk_rect(0,0,(float)ui->width,(float)ui->height), NK_WINDOW_NO_SCROLLBAR)) {
         nk_layout_row_dynamic(ctx, ui->row*1.35f, 5);
-        if (nk_button_label(ctx,tr("Başlat", "Start"))) gui_start(ui);
-        if (nk_button_label(ctx,tr("Duraklat", "Pause"))) gui_action(ui,"pause");
-        if (nk_button_label(ctx,tr("Devam et", "Resume"))) gui_action(ui,"resume");
-        if (nk_button_label(ctx,tr("Durdur", "Stop"))) gui_action(ui,"stop");
-        if (nk_button_label(ctx,tr("Ekranı kaydet", "Save screenshot"))) gui_action(ui,"screenshot");
+        if (nk_button_label(ctx, "Start")) gui_start(ui);
+        if (nk_button_label(ctx, "Pause")) gui_action(ui, "pause");
+        if (nk_button_label(ctx, "Resume")) gui_action(ui, "resume");
+        if (nk_button_label(ctx, "Stop")) gui_action(ui, "stop");
+        if (nk_button_label(ctx, "Save screenshot")) gui_action(ui, "screenshot");
         nk_layout_row_dynamic(ctx, ui->row*1.5f, 1);
         snprintf(line,sizeof(line),"%s · %ux%u · %s",s->phase,s->width,s->height,ui->feedback[0] ? ui->feedback : s->feedback);
         nk_label_wrap(ctx,line);
@@ -1035,9 +1115,13 @@ static void gui_render(MgGui *ui)
     }
 #else
     gui_x_prepare_text(ui);
-    nk_xlib_render(ui->window,nk_rgb(226,229,222));
-    if (show && ui->image) XPutImage(ui->display,ui->window,ui->display_gc,ui->image,
-         0,0,(int)ui->picture.x,(int)ui->picture.y,ui->scaled_w,ui->scaled_h);
+    nk_xlib_render(None, nk_rgb(226,229,222));
+    if (show && ui->image) {
+        Drawable back = nk_xlib_get_drawable();
+        if (back) XPutImage(ui->display, back, ui->display_gc, ui->image,
+                            0, 0, (int)ui->picture.x, (int)ui->picture.y, ui->scaled_w, ui->scaled_h);
+    }
+    nk_xlib_blit(ui->window);
     XFlush(ui->display);
 #endif
 }
@@ -1154,6 +1238,10 @@ static LRESULT CALLBACK gui_window_proc(HWND window,UINT msg,WPARAM wp,LPARAM lp
     if(msg==WM_KEYDOWN || msg==WM_SYSKEYDOWN || msg==WM_KEYUP || msg==WM_SYSKEYUP) {
         int down=msg==WM_KEYDOWN||msg==WM_SYSKEYDOWN;
         if(wp==VK_F12 && down) {gui_release(ui);return 0;}
+        if(wp==VK_MENU || wp==VK_LMENU || wp==VK_RMENU || wp==VK_LWIN || wp==VK_RWIN) {
+            gui_release(ui);
+            return DefWindowProcW(window,msg,wp,lp);
+        }
         if(ui->focused && wp<256) {
             uint32_t key=ui->held_keys[wp] ? ui->held_keys[wp]:gui_win_keysym(wp,lp);
             if(key && (!down || !ui->held_keys[wp])) gui_key(ui,key,down);
@@ -1161,8 +1249,12 @@ static LRESULT CALLBACK gui_window_proc(HWND window,UINT msg,WPARAM wp,LPARAM lp
         }
     }
     if(msg==WM_CHAR && ui->focused) return 0;
+    if(msg==WM_MOUSEMOVE) {
+        if(ui->ctx && nk_gdi_handle_event(window,msg,wp,lp)) return 0;
+        return DefWindowProcW(window,msg,wp,lp);
+    }
     if(msg==WM_LBUTTONDOWN||msg==WM_LBUTTONUP||msg==WM_RBUTTONDOWN||msg==WM_RBUTTONUP||
-       msg==WM_MBUTTONDOWN||msg==WM_MBUTTONUP||msg==WM_MOUSEMOVE||msg==WM_MOUSEWHEEL) {
+       msg==WM_MBUTTONDOWN||msg==WM_MBUTTONUP||msg==WM_MOUSEWHEEL) {
         int x=GET_X_LPARAM(lp),y=GET_Y_LPARAM(lp);
         unsigned button=msg==WM_LBUTTONDOWN||msg==WM_LBUTTONUP ? 1:
                         msg==WM_MBUTTONDOWN||msg==WM_MBUTTONUP ? 2:4;
@@ -1193,7 +1285,7 @@ static int gui_native_open(MgGui *ui)
     RegisterClassW(&wc);
     native_gui=ui;
     AdjustWindowRect(&rect,WS_OVERLAPPEDWINDOW,FALSE);
-    ui->window=CreateWindowW(wc.lpszClassName,L"Megas · VM",WS_OVERLAPPEDWINDOW,
+    ui->window=CreateWindowW(wc.lpszClassName,L"MegasXLR VM Komuta Merkezi",WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,CW_USEDEFAULT,rect.right-rect.left,rect.bottom-rect.top,NULL,NULL,wc.hInstance,NULL);
     if(!ui->window)return 0;
     ui->dc=GetDC(ui->window);
@@ -1240,7 +1332,18 @@ static int gui_native_open(MgGui *ui)
         ButtonReleaseMask|PointerMotionMask|StructureNotifyMask|FocusChangeMask;
     ui->window=XCreateWindow(ui->display,RootWindow(ui->display,ui->screen),0,0,1180,760,0,
         DefaultDepth(ui->display,ui->screen),InputOutput,DefaultVisual(ui->display,ui->screen),CWEventMask,&attributes);
-    XStoreName(ui->display,ui->window,"Megas · VM");
+    {
+        Atom net_wm_name = XInternAtom(ui->display, "_NET_WM_NAME", False);
+        Atom net_wm_icon_name = XInternAtom(ui->display, "_NET_WM_ICON_NAME", False);
+        Atom utf8_string = XInternAtom(ui->display, "UTF8_STRING", False);
+        const char *title = "MegasXLR VM Komuta Merkezi";
+        XStoreName(ui->display, ui->window, title);
+        XSetIconName(ui->display, ui->window, title);
+        XChangeProperty(ui->display, ui->window, net_wm_name, utf8_string, 8, PropModeReplace,
+                        (const unsigned char *)title, (int)strlen(title));
+        XChangeProperty(ui->display, ui->window, net_wm_icon_name, utf8_string, 8, PropModeReplace,
+                        (const unsigned char *)title, (int)strlen(title));
+    }
     ui->close_atom=XInternAtom(ui->display,"WM_DELETE_WINDOW",False);
     XSetWMProtocols(ui->display,ui->window,&ui->close_atom,1);
     memset(&hints,0,sizeof(hints));hints.flags=PMinSize|PMaxSize;
@@ -1255,14 +1358,17 @@ static int gui_native_open(MgGui *ui)
     /* XFontSet construction consults LC_CTYPE. Initialize it before the
      * backend creates its font set; nk_xlib_init configures the locale later. */
     if (!setlocale(LC_CTYPE, "") || !XSupportsLocale()) return 0;
-    ui->font=nk_xfont_create(ui->display,font_name);if(!ui->font)return 0;
-    gui_x_latin_fallback=0;
-    if(!gui_x_prepare_font(ui))return 0;
-    ui->ctx=nk_xlib_init(ui->font,ui->display,ui->screen,ui->window,1180,760);
-    if(ui->ctx)ui->font->handle.width=gui_x_text_width;
-    ui->display_gc=XCreateGC(ui->display,ui->window,0,NULL);
-    ui->row=(float)ui->font->height+12;
-    XMapWindow(ui->display,ui->window);return ui->ctx!=NULL;
+    ui->font = nk_xfont_create(ui->display, font_name);
+    if (!ui->font) return 0;
+    gui_x_latin_fallback = 0;
+    if (!gui_x_prepare_font(ui)) return 0;
+    ui->ctx = nk_xlib_init(ui->font, ui->display, ui->screen, ui->window, 1180, 760);
+    if (ui->ctx) ui->font->handle.width = gui_x_text_width;
+    ui->display_gc = XCreateGC(ui->display, ui->window, 0, NULL);
+    XSetGraphicsExposures(ui->display, ui->display_gc, False);
+    ui->row = (float)ui->font->height + 12;
+    XMapWindow(ui->display, ui->window);
+    return ui->ctx != NULL;
 }
 
 static void gui_native_events(MgGui *ui)
@@ -1276,15 +1382,21 @@ static void gui_native_events(MgGui *ui)
             if(ui->width>GUI_MAX_W || ui->height>GUI_MAX_H) {
                 ui->width=ui->width>GUI_MAX_W ? GUI_MAX_W:ui->width;
                 ui->height=ui->height>GUI_MAX_H ? GUI_MAX_H:ui->height;
-                XResizeWindow(ui->display,ui->window,(unsigned)(ui->width>GUI_MAX_W ? GUI_MAX_W:ui->width),
-                              (unsigned)(ui->height>GUI_MAX_H ? GUI_MAX_H:ui->height));
-                continue;
+                XResizeWindow(ui->display,ui->window,(unsigned)ui->width,(unsigned)ui->height);
             }
+            if(ui->width>0 && ui->height>0)
+                nk_xlib_resize((unsigned)ui->width, (unsigned)ui->height);
+            continue;
         }
         if(event.type==KeyPress||event.type==KeyRelease) {
             uint32_t key=(uint32_t)XLookupKeysym(&event.xkey,(event.xkey.state&ShiftMask)?1:0);
             unsigned code=event.xkey.keycode;int down=event.type==KeyPress;
             if(key==XK_F12 && down) {gui_release(ui);continue;}
+            if(key==XK_Alt_L || key==XK_Alt_R || key==XK_Super_L || key==XK_Super_R ||
+               key==XK_Meta_L || key==XK_Meta_R) {
+                gui_release(ui);
+                continue;
+            }
             if(ui->focused && code<256) {
                 if(ui->held_keys[code])key=ui->held_keys[code];
                 /* Ignore X11's artificial release/press repeat pair. */
@@ -1298,10 +1410,21 @@ static void gui_native_events(MgGui *ui)
                 ui->held_keys[code]=down ? key:0;continue;
             }
         }
-        if(event.type==ButtonPress||event.type==ButtonRelease||event.type==MotionNotify) {
-            int x=event.type==MotionNotify ? event.xmotion.x:event.xbutton.x;
-            int y=event.type==MotionNotify ? event.xmotion.y:event.xbutton.y;
-            unsigned button=event.type==MotionNotify ? 0:event.xbutton.button;
+        if(event.type==MotionNotify) {
+            XEvent next;
+            while(XPending(ui->display)) {
+                XPeekEvent(ui->display, &next);
+                if(next.type == MotionNotify && next.xmotion.window == event.xmotion.window) {
+                    XNextEvent(ui->display, &event);
+                } else break;
+            }
+            nk_xlib_handle_event(ui->display, ui->screen, ui->window, &event);
+            continue;
+        }
+        if(event.type==ButtonPress||event.type==ButtonRelease) {
+            int x=event.xbutton.x;
+            int y=event.xbutton.y;
+            unsigned button=event.xbutton.button;
             int down=event.type==ButtonPress;
             if(down && !gui_inside(ui->picture,x,y))gui_release(ui);
             if(gui_inside(ui->picture,x,y)||ui->buttons) {
@@ -1343,6 +1466,12 @@ int mg_gui_run(MgEngine *engine)
     snprintf(ui->checkpoint,sizeof(ui->checkpoint),"step-1");
     ui->ram=(int)config->ram_mb;ui->vm_w=(int)config->width;ui->vm_h=(int)config->height;
     ui->passwordless=config->passwordless;ui->disk_gb=16;
+    for (int i = 1; i < RES_PRESETS_COUNT; ++i) {
+        if (res_presets[i].w == ui->vm_w && res_presets[i].h == ui->vm_h) {
+            ui->res_selected = i;
+            break;
+        }
+    }
     if(!gui_native_open(ui)) {
         fprintf(stderr,"Megas cannot open a native desktop window. Run `megas serve` for headless control; "
                        "copy this prompt to your coding agent: Enable the native display session for Megas, "
@@ -1363,7 +1492,10 @@ int mg_gui_run(MgEngine *engine)
 #ifdef _WIN32
         MsgWaitForMultipleObjectsEx(0,NULL,16,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
 #else
-        {struct pollfd fd={ConnectionNumber(ui->display),POLLIN,0};poll(&fd,1,16);}
+        if (!XPending(ui->display)) {
+            struct pollfd fd={ConnectionNumber(ui->display),POLLIN,0};
+            poll(&fd,1,16);
+        }
 #endif
     }
     gui_release(ui);gui_password_clear(ui);gui_wipe(ui->pending,sizeof(ui->pending));

@@ -23,6 +23,9 @@ NK_API struct nk_context*   nk_xlib_init(XFont*, Display*, int scrn, Window root
 #endif
 NK_API int                  nk_xlib_handle_event(Display*, int scrn, Window, XEvent*);
 NK_API void                 nk_xlib_render(Drawable screen, struct nk_color clear);
+NK_API Drawable             nk_xlib_get_drawable(void);
+NK_API void                 nk_xlib_blit(Drawable screen);
+NK_API void                 nk_xlib_resize(unsigned int w, unsigned int h);
 NK_API void                 nk_xlib_shutdown(void);
 NK_API void                 nk_xlib_set_font(XFont*);
 NK_API void                 nk_xlib_push_font(XFont*);
@@ -165,6 +168,7 @@ nk_xsurf_create(int screen, unsigned int w, unsigned int h)
     surface->root = xlib.root;
     surface->gc = XCreateGC(xlib.dpy, xlib.root, 0, NULL);
     XSetLineAttributes(xlib.dpy, surface->gc, 1, LineSolid, CapButt, JoinMiter);
+    XSetGraphicsExposures(xlib.dpy, surface->gc, False);
     surface->drawable = XCreatePixmap(xlib.dpy, xlib.root, w, h,
         (unsigned int)DefaultDepth(xlib.dpy, screen));
 #ifdef NK_XLIB_USE_XFT
@@ -177,7 +181,7 @@ nk_xsurf_create(int screen, unsigned int w, unsigned int h)
 NK_INTERN void
 nk_xsurf_resize(XSurface *surf, unsigned int w, unsigned int h)
 {
-    if(!surf) return;
+    if(!surf || !w || !h) return;
     if (surf->w == w && surf->h == h) return;
     surf->w = w; surf->h = h;
     if(surf->drawable) XFreePixmap(surf->dpy, surf->drawable);
@@ -613,6 +617,8 @@ nk_xsurf_image_free(struct nk_image* image)
 NK_INTERN void
 nk_xsurf_clear(XSurface *surf, unsigned long color)
 {
+    if (!surf || !surf->drawable || !surf->w || !surf->h) return;
+    XSetClipMask(surf->dpy, surf->gc, None);
     XSetForeground(surf->dpy, surf->gc, color);
     XFillRectangle(surf->dpy, surf->drawable, surf->gc, 0, 0, surf->w, surf->h);
 }
@@ -620,6 +626,8 @@ nk_xsurf_clear(XSurface *surf, unsigned long color)
 NK_INTERN void
 nk_xsurf_blit(Drawable target, XSurface *surf, unsigned int w, unsigned int h)
 {
+    if (!surf || !surf->drawable || !surf->w || !surf->h || !target) return;
+    XSetClipMask(surf->dpy, surf->gc, None);
     XCopyArea(surf->dpy, surf->drawable, target, surf->gc, 0, 0, w, h, 0, 0);
 }
 
@@ -653,8 +661,6 @@ nk_xfont_create(Display *dpy, const char *name)
     XFont *font = (XFont*)calloc(1, sizeof(XFont));
     font->set = XCreateFontSet(dpy, name, &missing, &n, &def);
     if(missing) {
-        while(n--)
-            fprintf(stderr, "missing fontset: %s\n", missing[n]);
         XFreeStringList(missing);
     }
     if(font->set) {
@@ -1119,6 +1125,26 @@ nk_xlib_render(Drawable screen, struct nk_color clear)
         }
     }
     nk_clear(ctx);
-    nk_xsurf_blit(screen, surf, surf->w, surf->h);
+    if (screen)
+        nk_xsurf_blit(screen, surf, surf->w, surf->h);
+}
+
+NK_API Drawable
+nk_xlib_get_drawable(void)
+{
+    return xlib.surf ? xlib.surf->drawable : None;
+}
+
+NK_API void
+nk_xlib_blit(Drawable screen)
+{
+    if (xlib.surf && screen)
+        nk_xsurf_blit(screen, xlib.surf, xlib.surf->w, xlib.surf->h);
+}
+
+NK_API void
+nk_xlib_resize(unsigned int w, unsigned int h)
+{
+    nk_xsurf_resize(xlib.surf, w, h);
 }
 #endif
