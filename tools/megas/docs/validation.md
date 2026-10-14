@@ -116,8 +116,8 @@ returned nonempty text for current image generation 6 and its measured peak
 process memory was 32,931,840 bytes, below the 48 MiB limit. This is Windows
 Server 2022 runner evidence; it does not establish Windows 11 desktop GUI,
 QGA, or Doom end-to-end behavior. That run predates the Windows native RSS
-sampling change, so it does not verify that new measurement path; Windows CI
-confirmation of the sampler is pending.
+sampling change; at the time this historical note was written, CI confirmation
+of the sampler was pending. See the newer native CI record below.
 
 The initial Linux Actions job (`38452749483`, job `115487561239`) failed the
 required live OCR check with `OCR did not produce a bounded successful result
@@ -147,8 +147,9 @@ On Linux, the bounded child launcher now sets `OMP_THREAD_LIMIT=1` only after
 fork and only for memory-capped children; the only current bounded call site
 is the OCR process. This keeps the OpenMP worker allocations within the
 existing `RLIMIT_DATA` budget while leaving the controller environment and
-48 MiB RSS watchdog unchanged. The post-fix Actions rerun and Windows RSS
-sampler CI check are still pending; this local pass does not replace them.
+48 MiB RSS watchdog unchanged. At the time of this historical note, the
+post-fix Actions rerun and Windows RSS sampler CI check were still pending;
+the later CI record below supersedes that status.
 
 ## Checkpoint budget and re-owner validation — 2026-10-14
 
@@ -177,6 +178,52 @@ owner. Both post-restart pixel hashes matched their original guest states:
 `dab5ed8f3335b5bdd5570b85ee0ae33402df94cf50f35bb6b068c87f22e6935a` and
 `8ae59fdc05ab358df03dc2850ce508ae0044b54c7e97c93936f53e1452e585ff`.
 Tesseract returned 58 bytes for current image generation 8 and sampled a peak
-of 30,134,272 bytes, below 48 MiB. GitHub Actions for this checkpoint update
-were still pending when this local validation was recorded; the historical CI
-results above do not validate the checkpoint catalog changes.
+of 30,134,272 bytes, below 48 MiB. This local validation predates the native CI
+record below; the earlier CI results above do not validate the checkpoint
+catalog changes.
+
+## Native CI record — 2026-10-14, commit b7bdb815
+
+This record is for [commit
+`b7bdb81500c222c8d878f46f9f3a5799a1542b15`](https://github.com/void0x14/MegasXLR-qemu/commit/b7bdb81500c222c8d878f46f9f3a5799a1542b15),
+[push run 38503004757](https://github.com/void0x14/MegasXLR-qemu/actions/runs/38503004757)
+and [PR run 38503008393](https://github.com/void0x14/MegasXLR-qemu/actions/runs/38503008393).
+All four native test steps passed their 17 real-QEMU checks, including
+checkpoint re-import, unique automatic checkpoint labels after owner restart,
+pixel-verified restores and process RSS sampling. The two Linux jobs completed
+successfully, including Linux bundle smoke testing and artifact upload:
+[push job 115654057179](https://github.com/void0x14/MegasXLR-qemu/actions/runs/38503004757/job/115654057179),
+[PR job 115654068514](https://github.com/void0x14/MegasXLR-qemu/actions/runs/38503008393/job/115654068514).
+
+Both Linux jobs used QEMU 8.2.2 on TCG with 64 MiB configured guest RAM. They
+imported 16 owned checkpoints; the replacement owner restored `past` and
+`future` to matching framebuffer hashes
+(`dab5ed8f3335b5bdd5570b85ee0ae33402df94cf50f35bb6b068c87f22e6935a` and
+`8ae59fdc05ab358df03dc2850ce508ae0044b54c7e97c93936f53e1452e585ff`).
+After restart, action 48 collided with imported history and safely produced
+`step-48-before-2` and `step-48-after-2`. OCR returned 58 bytes for current
+image generation 8; peak OCR process RSS was 38,256,640 bytes on push and
+38,440,960 bytes on the PR run. Controller RSS ranged from 1,992–2,056 KiB
+idle and 3,552–3,616 KiB live; QEMU RSS was 67,088–78,000 KiB.
+
+Both Windows Server 2022 jobs used QEMU 11.1.2 on TCG with 64 MiB configured
+guest RAM. They passed the same 17 live checks and the agent stdio test. Each
+imported 16 owned checkpoints and verified the same `past` and `future` pixel
+hashes after owner restart. Collision-safe labels were created at step 55 on
+push and step 52 on the PR run. OCR returned 58 bytes for current image
+generation 5; peak OCR process RSS was 32,956,416 bytes on push and 33,058,816
+bytes on the PR run. Controller RSS ranged from 4,028–4,044 KiB idle and
+5,516–5,536 KiB live; QEMU RSS was 49,128–50,148 KiB. The native test records
+do not establish Windows 11 desktop behavior.
+
+The Windows private bundle built, extracted, and passed its isolated installer,
+installed command-line, QEMU, Tesseract and English-data checks. The packaged
+GUI opened a native window and closed after a normal close request, but both
+Windows jobs then failed the final exit-code assertion because PowerShell
+reported a blank process `ExitCode`. The [push Windows job
+115654057480](https://github.com/void0x14/MegasXLR-qemu/actions/runs/38503004757/job/115654057480)
+and [PR Windows job
+115654068673](https://github.com/void0x14/MegasXLR-qemu/actions/runs/38503008393/job/115654068673)
+are therefore failures overall; the Windows bundle upload steps were skipped.
+This entry records those exact runs and remains historical if the smoke check
+is later changed and rerun.

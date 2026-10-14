@@ -203,7 +203,10 @@ jobs:
             $guiArguments = @('--runtime', ('"{0}"' -f $guiRuntime), 'gui')
             Add-Content -LiteralPath $log -Value ("> GUI launch: " + $guiExecutable + ' ' + ($guiArguments -join ' '))
             $guiProcess = Start-Process -FilePath $guiExecutable -ArgumentList $guiArguments -PassThru -WorkingDirectory $work -WindowStyle Normal -RedirectStandardOutput $guiOutput -RedirectStandardError $guiError
+            $guiProcessHandle = $guiProcess.Handle
+            if ($guiProcessHandle -eq [IntPtr]::Zero) { throw 'Could not retain a native process handle for the packaged GUI' }
             Add-Content -LiteralPath $log -Value ("GUI PID: " + $guiProcess.Id)
+            Add-Content -LiteralPath $log -Value ("GUI process handle retained: 0x{0:X}" -f $guiProcessHandle.ToInt64())
             $windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
             do {
               $guiProcess.Refresh()
@@ -221,16 +224,17 @@ jobs:
             if ($workingSet -ge (100 * 1024 * 1024)) { throw ("Packaged GUI working set exceeded 100 MiB: " + $workingSet + ' bytes') }
             if (-not $guiProcess.CloseMainWindow()) { throw 'Could not request a normal close of the packaged GUI main window' }
             if (-not $guiProcess.WaitForExit(10000)) { throw 'Packaged GUI did not exit within 10 seconds after CloseMainWindow' }
-            $guiProcess.Refresh()
-            if ($guiProcess.ExitCode -ne 0) { throw ("Packaged GUI exited with code " + $guiProcess.ExitCode + ' after a normal window close') }
-            Add-Content -LiteralPath $log -Value ("GUI closed normally; PID " + $guiProcess.Id + '; exit code 0')
+            if (-not $guiProcess.HasExited) { throw 'Packaged GUI wait completed without confirming process exit' }
+            $guiExitCode = $guiProcess.ExitCode
+            if ($null -eq $guiExitCode) { throw 'Packaged GUI exit code was unavailable after process exit' }
+            if ($guiExitCode -ne 0) { throw ("Packaged GUI exited with code " + $guiExitCode + ' after a normal window close') }
+            Add-Content -LiteralPath $log -Value ("GUI exited after normal window close; PID " + $guiProcess.Id + '; exit code 0')
           } catch {
             Add-Content -LiteralPath $log -Value $_
             throw
           } finally {
             if ($guiProcess) {
               try {
-                $guiProcess.Refresh()
                 if (-not $guiProcess.HasExited) {
                   Add-Content -LiteralPath $log -Value ("GUI cleanup: force-terminating PID " + $guiProcess.Id + ' after smoke failure')
                   Stop-Process -Id $guiProcess.Id -Force -ErrorAction SilentlyContinue
