@@ -534,6 +534,13 @@ fail:
 #ifdef __linux__
         if (prctl(PR_SET_PDEATHSIG, SIGKILL)) spawn_child_fail(pipefd[1], errno);
         if (getppid() != owner) spawn_child_fail(pipefd[1], ECHILD);
+        /* Tesseract's OpenMP workers need additional data/stack mappings.
+         * RLIMIT_DATA limits those allocations, not resident RSS; keep this
+         * OCR child single-threaded so libgomp can stay within 48 MiB while
+         * the separate RSS watchdog remains authoritative. */
+        if (memory_bytes && setenv("OMP_THREAD_LIMIT", "1", 1)) {
+            spawn_child_fail(pipefd[1], errno);
+        }
 #else
         (void)owner;
 #endif

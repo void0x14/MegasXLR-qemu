@@ -113,19 +113,23 @@ took 309.66–313.62 ms. Tesseract
 returned nonempty text for current image generation 6 and its measured peak
 process memory was 32,931,840 bytes, below the 48 MiB limit. This is Windows
 Server 2022 runner evidence; it does not establish Windows 11 desktop GUI,
-QGA, or Doom end-to-end behavior. The live test now samples Windows process
-working set through the native process-memory API and requires those owner RSS
-measurements to be available.
+QGA, or Doom end-to-end behavior. That run predates the Windows native RSS
+sampling change, so it does not verify that new measurement path; Windows CI
+confirmation of the sampler is pending.
 
-The latest Linux Actions job (`38452749483`, job `115487561239`) failed the
-required live OCR check. The controller reported `OCR did not produce a
-bounded successful result (exit 1, memory cap 48 MiB); no text was inferred.`
-The nonempty OCR text, current-generation match and 48 MiB measurement remain
-required; this failure is not counted as a pass. On OCR assertion failures,
-`tests/test_live.py` now records the text-only adapter reply before validating
-it and preserves a bounded status excerpt and tail of the combined OCR child
-log in the JSON report, so the captured child diagnostics can identify why
-Tesseract exited unsuccessfully.
+The initial Linux Actions job (`38452749483`, job `115487561239`) failed the
+required live OCR check with `OCR did not produce a bounded successful result
+(exit 1, memory cap 48 MiB); no text was inferred.` Later diagnostic runs
+(`38497904385` for push and `38497909496` for the PR) exposed the child log:
+`libgomp` could not create a thread (`Resource temporarily unavailable`),
+followed by `std::bad_alloc`. The measured OCR RSS was 36,081,664 bytes in the
+push run and 35,885,056 bytes in the PR run, both below 48 MiB. The cause was
+the Linux `RLIMIT_DATA` limit constraining OpenMP thread data and virtual stack
+allocations as well as ordinary data, while the independent RSS measurements
+stayed under budget. The nonempty OCR text, current-generation match and RSS
+limit remain required. On OCR assertion failures, `tests/test_live.py` records
+the text-only adapter reply before validating it and preserves a bounded
+status excerpt and tail of the combined OCR child log in the JSON report.
 
 A local Linux reproduction then passed all 15 live-QEMU checks with QEMU 8.2.2.
 It produced 58 OCR text bytes for current generation 7 and measured a peak of
@@ -133,3 +137,13 @@ It produced 58 OCR text bytes for current generation 7 and measured a peak of
 result above. A separate forced-exit test made a temporary Tesseract wrapper
 write a fixture diagnostic to stderr and exit 1; the failure report retained
 the adapter response, owner status, and bounded OCR log tail before cleanup.
+
+After the child-only fix, local `make test` passed. Its live report shows all
+15 checks passing, with nonempty Tesseract output for current image generation
+7, a matching adapter generation, and peak OCR memory of 30,130,176 bytes.
+On Linux, the bounded child launcher now sets `OMP_THREAD_LIMIT=1` only after
+fork and only for memory-capped children; the only current bounded call site
+is the OCR process. This keeps the OpenMP worker allocations within the
+existing `RLIMIT_DATA` budget while leaving the controller environment and
+48 MiB RSS watchdog unchanged. The post-fix Actions rerun and Windows RSS
+sampler CI check are still pending; this local pass does not replace them.

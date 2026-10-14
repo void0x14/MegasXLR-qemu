@@ -40,8 +40,9 @@ class WindowsImportTests(unittest.TestCase):
             private_dll.touch()
             with mock.patch.object(bundle.subprocess, "run",
                                    return_value=SimpleNamespace(stdout=output)):
-                self.assertEqual([private_dll],
-                                 bundle.imports_windows(Path("megas.exe"), [directory]))
+                dependencies = bundle.imports_windows(Path("megas.exe"), [directory])
+                self.assertEqual([path.as_posix().casefold() for path in dependencies],
+                                 [private_dll.as_posix().casefold()])
 
 
 if __name__ == "__main__":
