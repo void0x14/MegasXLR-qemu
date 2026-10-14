@@ -41,6 +41,39 @@ def imports_linux(binary):
     return [Path(match) for match in re.findall(r"(?:=>\s+)?(/[^\s()]+)", output)]
 
 
+def windows_system_directory():
+    if os.name != "nt":
+        return None
+    import ctypes
+
+    get_system_directory = ctypes.WinDLL(
+        "kernel32", use_last_error=True).GetSystemDirectoryW
+    get_system_directory.argtypes = (ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint)
+    get_system_directory.restype = ctypes.c_uint
+    size = 260
+    while size <= 32768:
+        buffer = ctypes.create_unicode_buffer(size)
+        length = get_system_directory(buffer, size)
+        if not length:
+            return None
+        if length < size:
+            return Path(buffer.value)
+        size = length + 1
+    return None
+
+
+def windows_system_dlls(system_directory=None):
+    if system_directory is None:
+        system_directory = windows_system_directory()
+    if system_directory is None:
+        return set()
+    system_directory = Path(system_directory)
+    if not system_directory.is_dir():
+        return set()
+    return {entry.name.lower() for entry in system_directory.iterdir()
+            if entry.is_file() and entry.suffix.lower() in (".dll", ".drv")}
+
+
 def imports_windows(binary, search):
     output = subprocess.run(["objdump", "-p", str(binary)], text=True,
                             capture_output=True, check=True).stdout
@@ -53,11 +86,13 @@ def imports_windows(binary, search):
                "secur32.dll", "setupapi.dll", "shell32.dll", "shlwapi.dll",
                "version.dll", "winmm.dll", "winspool.drv", "wtsapi32.dll",
                "msvcrt.dll", "ucrtbase.dll", "comdlg32.dll", "comctl32.dll",
-               "dwmapi.dll", "imm32.dll", "netapi32.dll", "normaliz.dll",
+               "dwmapi.dll", "imm32.dll", "netapi32.dll", "ncrypt.dll",
+               "normaliz.dll",
                "psapi.dll", "rpcrt4.dll", "userenv.dll", "winhttp.dll",
                "wininet.dll", "powrprof.dll", "dwrite.dll", "dxgi.dll",
                "d3d11.dll", "opengl32.dll", "winhvplatform.dll", "cfgmgr32.dll",
                "msimg32.dll", "uxtheme.dll", "shcore.dll", "usp10.dll"}
+    system_dll_names = windows_system_dlls()
     available = {}
     for directory in search:
         if directory.is_dir():
@@ -65,11 +100,14 @@ def imports_windows(binary, search):
                               if entry.is_file()})
     for name in names:
         lower = name.lower()
-        if lower in os_dlls or lower.startswith(("api-ms-", "ext-ms-")):
+        if lower.startswith(("api-ms-", "ext-ms-")) or lower in os_dlls:
             continue
-        if lower not in available:
+        if lower in available:
+            result.append(available[lower])
+        elif lower in system_dll_names:
+            continue
+        else:
             raise RuntimeError(f"Unresolved application DLL {name} imported by {binary}")
-        result.append(available[lower])
     return result
 
 

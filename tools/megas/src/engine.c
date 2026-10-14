@@ -23,8 +23,13 @@
 #define TOKEN_CAP 4096
 #define HISTORY_CAP 128
 #define SNAPSHOT_CAP 16
+#define SNAPSHOT_CATALOG_CAP 64
+#define SNAPSHOT_TAG_CAP 128
+#define SNAPSHOT_MANAGED_PREFIX "megas-owned:"
+/* Retain at least two full RAM snapshots plus bounded qcow2 metadata. */
+#define SNAPSHOT_METADATA_RESERVE (64ULL * 1024 * 1024)
 #define JOURNAL_CAP (64ULL * 1024 * 1024)
-#define SNAPSHOT_BUDGET (2ULL * 1024 * 1024 * 1024)
+#define SNAPSHOT_BUDGET_FLOOR (2ULL * 1024 * 1024 * 1024)
 #define FREE_RESERVE (512ULL * 1024 * 1024)
 #define COMMAND_MS 4500
 #define OCR_MEMORY_BYTES (48ULL * 1024 * 1024)
@@ -47,7 +52,8 @@ typedef struct { char *s;
  } Buffer;
 
 typedef struct { uint64_t step;
- char name[64];
+ char name[64], tag[SNAPSHOT_TAG_CAP];
+ int owned, restorable;
  } Snapshot;
 
 typedef struct { uint64_t step, ms;
@@ -90,9 +96,11 @@ struct MgEngine {
 
     int job_active, job_concluded, poisoned, disposed;
 
-    char job_id[64], job_kind[24], job_tag[64];
+    char job_id[64], job_kind[24], job_tag[SNAPSHOT_TAG_CAP], job_snapshot_name[64];
+    int job_snapshot_owned;
 
     uint64_t job_started, disk_base, snapshot_serial, last_export_generation, last_frame, last_rfb_attempt, last_job_poll;
+    int disk_base_known, snapshot_catalog_available;
     int transient_response, harness_live[4], utility_live;
     int guest_active, guest_checkpoint, guest_passwordless, guest_passwordless_before;
     int guest_password_set, guest_auto_password_set;
@@ -108,7 +116,7 @@ struct MgEngine {
     uint64_t ocr_generation, ocr_deadline, ocr_pid, ocr_peak_memory;
     char ocr_text[4097], ocr_output[1024], ocr_log[1024], ocr_message[256];
 
-    Snapshot snapshots[SNAPSHOT_CAP];
+    Snapshot snapshots[SNAPSHOT_CATALOG_CAP];
  unsigned snapshot_count;
 
     History history[HISTORY_CAP];
@@ -403,6 +411,25 @@ value=strtoul(copy,&end,10);
 return 0;
 
 }
+static int juint64(Json *j,int i,uint64_t *n) {
+    int p,end;
+uint64_t value=0;
+if(i<0||j->t[i].type!='p')return -1;
+p=j->t[i].start;
+end=j->t[i].end;
+if(p==end)return -1;
+for(;p<end;p++){
+    unsigned digit;
+    if(j->s[p]<'0'||j->s[p]>'9')return -1;
+    digit=(unsigned)(j->s[p]-'0');
+    if(value>(UINT64_MAX-digit)/10)return -1;
+    value=value*10+digit;
+}
+if(value>INT64_MAX)return -1;
+*n=value;
+return 0;
+
+}
 static unsigned number_or(Json *j,const char *key,unsigned fallback){unsigned n;
 return jnumber(j,jget(j,0,key),&n)?fallback:n;
 }
@@ -440,11 +467,13 @@ static void repair(MgEngine *e,const char *action) {
         "Repair MegasXLR native VM controller without deleting guest disks or forensic logs.\n"
         "Requested action: %.63s\nObserved phase: %.63s\nFeedback: %.511s\n"
         "Owner PID: %d; QMP 127.0.0.1:%u; live RFB 127.0.0.1:%u.\n"
+        "Checkpoint catalog verified: %s; listed entries: %u; allocated-size baseline verified: %s.\n"
         "Read action/event journal: %.1023s\nRead owned process output: %.1023s\n"
         "Read latest visible state: %.1023s\n"
         "Find the concrete cause, apply the smallest fix, verify current state through megas status, and report evidence. "
         "Do not fabricate successful input, guest login policy, display resize, or snapshot restore. Do not retry uncertain mutations blindly.",
         action,e->status.phase,e->status.feedback,e->status.owned_pid,e->cfg.qmp_port,e->cfg.vnc_port,
+        e->snapshot_catalog_available?"yes":"no",e->snapshot_count,e->disk_base_known?"yes":"no",
         e->status.journal_path,e->qemu_log,e->status.image_path);
 
 }
@@ -693,23 +722,176 @@ break;
 return found;
 
 }
+static int valid_name(const char *name);
+static int snapshot_catalog_import(MgEngine *e,Json *j,int image);
+static int snapshot_disk_allocated(MgEngine *e,uint64_t *allocated,int import_catalog) {
+    Json *j;
+int ret,i,matches=0,failed=0,image_for_catalog=-1;
+int qcow2_nodes=0;
+uint64_t value=0;
+
+    if(import_catalog){e->snapshot_catalog_available=0;e->snapshot_count=0;}
+
+    if(qmp_exec(e,"query-block",NULL,500)){
+        char reason[512];snprintf(reason,sizeof(reason),"%.511s",e->status.feedback);
+        if(import_catalog)feedback(e,"Checkpoint catalog unavailable because QEMU query-block did not complete. Existing checkpoints were not imported.");
+        feedback(e,"Cannot verify checkpoint disk allocation because QEMU query-block did not complete: %s",reason);
+        return -1;
+    }
+    j=malloc(sizeof(*j));
+if(!j){if(import_catalog)feedback(e,"Checkpoint catalog unavailable because memory for QEMU's bounded response parser is unavailable.");feedback(e,"Cannot verify checkpoint disk allocation: memory for QEMU's bounded response parser is unavailable.");return -1;}
+    if(jparse(j,e->qmp_reply)){
+        free(j);if(import_catalog)feedback(e,"Checkpoint catalog unavailable because QEMU returned invalid query-block JSON.");feedback(e,"Cannot verify checkpoint disk allocation: QEMU returned invalid query-block JSON.");return -1;
+    }
+    ret=jget(j,0,"return");
+if(ret<0||j->t[ret].type!='[')failed=1;
+    if(!failed)for(i=ret+1;i<j->n;i++)if(j->t[i].parent==ret&&j->t[i].type=='{'){
+        int inserted=jget(j,i,"inserted"),node,drv,image,format,actual;
+        if(inserted<0||j->t[inserted].type!='{')continue;
+        node=jget(j,inserted,"node-name");
+        if(node<0||!jeq(j,node,"megasdisk"))continue;
+        matches++;
+        drv=jget(j,inserted,"drv");
+        image=jget(j,inserted,"image");
+        if(image>=0&&j->t[image].type=='{')image_for_catalog=image;
+        format=image>=0&&j->t[image].type=='{'?jget(j,image,"format"):-1;
+        actual=image>=0&&j->t[image].type=='{'?jget(j,image,"actual-size"):-1;
+        if(drv>=0&&jeq(j,drv,"qcow2")&&format>=0&&jeq(j,format,"qcow2"))qcow2_nodes++;
+        else failed=1;
+        if(juint64(j,actual,&value))failed=1;
+    }
+    if(import_catalog){
+        if(matches!=1||qcow2_nodes!=1||image_for_catalog<0){
+            e->snapshot_count=0;
+            feedback(e,"Checkpoint catalog unavailable because QEMU did not report exactly one verified qcow2 megasdisk image.");
+        }else if(snapshot_catalog_import(e,j,image_for_catalog)){
+            e->snapshot_count=0;
+            e->snapshot_catalog_available=0;
+            feedback(e,"Checkpoint catalog unavailable because QEMU's managed qcow2 snapshot list was malformed or exceeded the bounded 64-entry limit.");
+        }else e->snapshot_catalog_available=1;
+    }
+    free(j);
+    if(failed||matches!=1){
+        feedback(e,"Cannot verify checkpoint disk allocation: QEMU did not report one qcow2 megasdisk node with a valid nonnegative 64-bit actual-size.");
+        return -1;
+    }
+    *allocated=value;
+return 0;
+
+}
 static int valid_name(const char *name) {size_t i,n=strlen(name);
 if(!n||n>=64)return 0;
 for(i=0;i<n;i++)if(!isalnum((unsigned char)name[i])&&name[i]!='_'&&name[i]!='-'&&name[i]!='.')return 0;
 return 1;
 }
+static int snapshot_name_used(const Snapshot *snapshots,unsigned count,unsigned skip,const char *name) {
+    unsigned i;
+    for(i=0;i<count;i++)if(i!=skip&&snapshots[i].name[0]&&!strcmp(name,snapshots[i].name))return 1;
+    return 0;
+}
+static int snapshot_alias_name(Snapshot *snapshots,unsigned count,unsigned index) {
+    char candidate[64];
+    unsigned suffix;
+    for(suffix=1;suffix<1000;suffix++){
+        if(suffix==1)snprintf(candidate,sizeof(candidate),"foreign-%u",index+1);
+        else snprintf(candidate,sizeof(candidate),"foreign-%u-%u",index+1,suffix);
+        if(!snapshot_name_used(snapshots,count,index,candidate)){
+            snprintf(snapshots[index].name,sizeof(snapshots[index].name),"%s",candidate);
+            return 0;
+        }
+    }
+    return -1;
+}
+static uint64_t snapshot_step_from_name(const char *name) {
+    const char *p;
+    char *end;
+    unsigned long long step;
+    if(strncmp(name,"step-",5))return 0;
+    p=name+5;
+    if(!isdigit((unsigned char)*p))return 0;
+    errno=0;step=strtoull(p,&end,10);
+    return errno||*end!='-'?0:(uint64_t)step;
+}
+static int snapshot_catalog_import(MgEngine *e,Json *j,int image) {
+    Snapshot imported[SNAPSHOT_CATALOG_CAP];
+    const size_t prefix_len=strlen(SNAPSHOT_MANAGED_PREFIX);
+    int list=jget(j,image,"snapshots");
+    unsigned count=0,i;
+    int token;
+
+    memset(imported,0,sizeof(imported));
+    /* QEMU omits the optional field when a qcow2 image has no snapshots. */
+    if(list<0){e->snapshot_count=0;return 0;}
+    if(j->t[list].type!='[')return -1;
+    for(token=list+1;token<j->n;token++){
+        Snapshot *s;
+        char raw[SNAPSHOT_TAG_CAP];
+        int state;
+        uint64_t value;
+        if(j->t[token].start>=j->t[list].end)break;
+        if(j->t[token].parent!=list||j->t[token].type!='{')continue;
+        if(count==SNAPSHOT_CATALOG_CAP)return -1;
+        s=&imported[count];
+        if(jstring(j,jget(j,token,"name"),raw,sizeof(raw))||!raw[0])return -1;
+        snprintf(s->tag,sizeof(s->tag),"%s",raw);
+        s->owned=!strncmp(raw,SNAPSHOT_MANAGED_PREFIX,prefix_len);
+        if(s->owned){
+            const char *label=raw+prefix_len;
+            if(!valid_name(label))return -1;
+            memcpy(s->name,label,strlen(label)+1);
+        }else if(valid_name(raw))memcpy(s->name,raw,strlen(raw)+1);
+        state=jget(j,token,"vm-state-size");
+        s->restorable=!juint64(j,state,&value)&&value>0;
+        s->step=snapshot_step_from_name(s->name);
+        for(i=0;i<count;i++)if(!strcmp(imported[i].tag,s->tag))return -1;
+        count++;
+    }
+    /* Preserve a useful name for ordinary foreign tags, while assigning a
+     * selectable local alias to unusual or colliding names. */
+    for(i=0;i<count;i++)if(imported[i].owned){
+        unsigned j2;
+        for(j2=0;j2<i;j2++)if(imported[j2].owned&&!strcmp(imported[j2].name,imported[i].name))return -1;
+    }
+    for(i=0;i<count;i++)if(!imported[i].owned){
+        if(!valid_name(imported[i].tag)||snapshot_name_used(imported,count,i,imported[i].tag)){
+            if(snapshot_alias_name(imported,count,i))return -1;
+        }else snprintf(imported[i].name,sizeof(imported[i].name),"%s",imported[i].tag);
+    }
+    memcpy(e->snapshots,imported,count*sizeof(imported[0]));
+    e->snapshot_count=count;
+    return 0;
+}
 static int snapshot_find(MgEngine *e,const char *name) {unsigned i;
 for(i=0;i<e->snapshot_count;i++)if(!strcmp(name,e->snapshots[i].name))return (int)i;
 return -1;
 }
+static int snapshot_find_tag(MgEngine *e,const char *tag) {unsigned i;
+for(i=0;i<e->snapshot_count;i++)if(!strcmp(tag,e->snapshots[i].tag))return (int)i;
+return -1;
+}
+static unsigned snapshot_owned_count(MgEngine *e) {unsigned i,count=0;
+for(i=0;i<e->snapshot_count;i++)if(e->snapshots[i].owned)count++;
+return count;
+}
+static int snapshot_oldest_owned(MgEngine *e) {
+    unsigned i;
+    /* QEMU's qcow2 query-block snapshot array follows its append-only snapshot
+     * table, so the first retained owned entry is the oldest. */
+    for(i=0;i<e->snapshot_count;i++)if(e->snapshots[i].owned)return (int)i;
+    return -1;
+}
 static void snapshot_done(MgEngine *e,int ok) {
     char info[192];
 
-    if(ok&&!strcmp(e->job_kind,"snapshot-save")&&e->snapshot_count<SNAPSHOT_CAP){Snapshot *s=&e->snapshots[e->snapshot_count++];
-snprintf(s->name,sizeof(s->name),"%s",e->job_tag);
-s->step=e->status.actions;
+    if(ok&&!strcmp(e->job_kind,"snapshot-save")&&e->snapshot_count<SNAPSHOT_CATALOG_CAP){Snapshot *s=&e->snapshots[e->snapshot_count++];
+memset(s,0,sizeof(*s));
+snprintf(s->name,sizeof(s->name),"%s",e->job_snapshot_name);
+snprintf(s->tag,sizeof(s->tag),"%s",e->job_tag);
+s->step=snapshot_step_from_name(s->name);
+s->owned=e->job_snapshot_owned;
+s->restorable=1;
 }
-    if(ok&&!strcmp(e->job_kind,"snapshot-delete")){int i=snapshot_find(e,e->job_tag);
+    if(ok&&!strcmp(e->job_kind,"snapshot-delete")){int i=snapshot_find_tag(e,e->job_tag);
 if(i>=0){memmove(e->snapshots+i,e->snapshots+i+1,(e->snapshot_count-(unsigned)i-1)*sizeof(Snapshot));
 e->snapshot_count--;
 }}
@@ -720,8 +902,8 @@ journal(e,"snapshot_result",info);
 
     e->job_active=0;
 e->job_concluded=0;
-
 }
+
 static int snapshot_poll(MgEngine *e) {
     Json *j;
 int ret,i,result=0,found=0;
@@ -771,45 +953,164 @@ if(!found&&!result&&!e->late_id&&mgp_now()-e->job_started>1000){
 return result;
 
 }
+static int snapshot(MgEngine *e,const char *kind,const char *tag);
+static int snapshot_disk_directory(MgEngine *e,char *directory,size_t capacity) {
+    char *p;
+if(snprintf(directory,capacity,"%s",e->cfg.disk)>=(int)capacity)return -1;
+p=strrchr(directory,'/');
+#ifdef _WIN32
+    {char *q=strrchr(directory,'\\');
+if(q&&(!p||q>p))p=q;
+}
+#endif
+    if(p)*p=0;
+else if(snprintf(directory,capacity,".")>=(int)capacity)return -1;
+return 0;
+
+}
+static uint64_t snapshot_budget_bytes(MgEngine *e) {
+    uint64_t ram_bytes=(uint64_t)e->cfg.ram_mb*1024*1024;
+uint64_t scaled_budget;
+if(ram_bytes>(UINT64_MAX-SNAPSHOT_METADATA_RESERVE)/2)return UINT64_MAX;
+scaled_budget=2*ram_bytes+SNAPSHOT_METADATA_RESERVE;
+return scaled_budget>SNAPSHOT_BUDGET_FLOOR?scaled_budget:SNAPSHOT_BUDGET_FLOOR;
+
+}
+static int snapshot_room(MgEngine *e,int reserve_next,uint64_t *allocated,uint64_t *free_bytes) {
+    char directory[1024];
+uint64_t ram_bytes=(uint64_t)e->cfg.ram_mb*1024*1024;
+uint64_t budget_reserve=reserve_next?ram_bytes:0;
+uint64_t budget=snapshot_budget_bytes(e);
+uint64_t disk_growth;
+int budget_ok,free_ok;
+
+    if(!e->disk_base_known){
+        feedback(e,"Checkpoint refused because QEMU did not provide a trustworthy allocated-size baseline for the managed megasdisk qcow2 node.");
+        return -1;
+    }
+    if(budget_reserve>budget){
+        feedback(e,"One checkpoint at the configured RAM size cannot fit within the allocated-size checkpoint budget; no checkpoint was saved.");
+        return -1;
+    }
+    if(snapshot_disk_allocated(e,allocated,0))return -1;
+    if(snapshot_disk_directory(e,directory,sizeof(directory))){
+        feedback(e,"Cannot verify checkpoint free space because the managed disk path is too long.");
+        return -1;
+    }
+    *free_bytes=mgp_disk_free(directory);
+    disk_growth=*allocated>e->disk_base?*allocated-e->disk_base:0;
+    budget_ok=disk_growth<=budget-budget_reserve;
+    free_ok=*free_bytes>=FREE_RESERVE+budget_reserve;
+    return budget_ok&&free_ok?1:0;
+
+}
+static int snapshot_delete_oldest(MgEngine *e,const char *reason) {
+    char oldest[SNAPSHOT_TAG_CAP],label[64],audit[192];
+int i=snapshot_oldest_owned(e);
+if(i<0){feedback(e,"No Megas-owned checkpoint is available for automatic eviction; foreign checkpoints were preserved.");return -1;}
+snprintf(oldest,sizeof(oldest),"%s",e->snapshots[i].tag);
+snprintf(label,sizeof(label),"%s",e->snapshots[i].name);
+snprintf(audit,sizeof(audit),"%s: evicting oldest owned checkpoint '%s'",reason,label);
+if(journal(e,"checkpoint_eviction",audit)){
+    feedback(e,"Checkpoint eviction was not attempted because its audit record could not be saved.");
+    return -1;
+}
+return snapshot(e,"snapshot-delete",oldest);
+
+}
+static int snapshot_make_room(MgEngine *e,const char *protected_tag,int reserve_next,int enforce_retention) {
+    uint64_t allocated=0,free_bytes=0,previous_allocated=0,ram_bytes=(uint64_t)e->cfg.ram_mb*1024*1024;
+uint64_t budget=snapshot_budget_bytes(e);
+unsigned evicted=0;
+char detail[256];
+int room,have_previous=0,retention_pending,catalog_pending;
+
+    if(reserve_next&&ram_bytes>budget){
+        feedback(e,"One checkpoint at the configured RAM size cannot fit within the allocated-size checkpoint budget; no checkpoint was saved.");
+        return -1;
+    }
+    for(;;){
+        retention_pending=enforce_retention&&snapshot_owned_count(e)>=SNAPSHOT_CAP;
+        catalog_pending=enforce_retention&&e->snapshot_count>=SNAPSHOT_CATALOG_CAP;
+        room=snapshot_room(e,reserve_next,&allocated,&free_bytes);
+        if(room<0)return -1;
+        if(room&&!retention_pending&&!catalog_pending)return 0;
+        if(!room&&!retention_pending&&!catalog_pending&&have_previous&&reserve_next&&!protected_tag&&allocated==previous_allocated&&
+           free_bytes>=FREE_RESERVE+ram_bytes){
+            snprintf(detail,sizeof(detail),"one reuse retry after confirmed eviction; allocated=%llu baseline=%llu budget=%llu free=%llu",
+                (unsigned long long)allocated,(unsigned long long)e->disk_base,
+                (unsigned long long)budget,(unsigned long long)free_bytes);
+            if(journal(e,"checkpoint_reuse_retry",detail)){
+                feedback(e,"Checkpoint was not saved because the bounded reuse retry could not be recorded in the audit journal.");
+                return -1;
+            }
+            return 1;
+        }
+        snprintf(detail,sizeof(detail),"allocated=%llu baseline=%llu budget=%llu free=%llu ram=%llu next=%s",
+            (unsigned long long)allocated,(unsigned long long)e->disk_base,
+            (unsigned long long)budget,(unsigned long long)free_bytes,(unsigned long long)ram_bytes,
+            reserve_next?"true":"false");
+        if(!room&&journal(e,"checkpoint_budget_pressure",detail)){
+            feedback(e,"Checkpoint was not saved because the budget decision could not be recorded in the audit journal.");
+            return -1;
+        }
+        if(snapshot_owned_count(e)&&evicted<SNAPSHOT_CATALOG_CAP){
+            {int oldest=snapshot_oldest_owned(e);
+            if(protected_tag&&oldest>=0&&!strcmp(e->snapshots[oldest].tag,protected_tag)){
+                if(snapshot(e,"snapshot-delete",protected_tag))return -1;
+                feedback(e,"Checkpoint '%s' exceeded the allocated-size or free-space budget and was removed; no checkpoint was reported successful.",e->job_snapshot_name);
+                return -1;
+            }}
+            previous_allocated=allocated;
+            have_previous=1;
+            if(snapshot_delete_oldest(e,retention_pending?"retention cap":catalog_pending?"bounded catalog capacity":"allocated-size or free-space pressure"))return -1;
+            evicted++;
+            continue;
+        }
+        snprintf(detail,sizeof(detail),"%u owned checkpoint(s) evicted; allocated=%llu; budget=%llu; free=%llu",
+            evicted,(unsigned long long)allocated,(unsigned long long)budget,(unsigned long long)free_bytes);
+        if(journal(e,"checkpoint_budget_exhausted",detail)){
+            feedback(e,"Checkpoint was not saved because the exhausted-budget decision could not be recorded in the audit journal.");
+            return -1;
+        }
+        if(evicted)feedback(e,"Checkpoint budget or free-space reserve remains exhausted after evicting %u oldest owned checkpoint(s); allocation budget is %llu MiB; no new checkpoint was saved.",evicted,(unsigned long long)(budget/(1024*1024)));
+        else feedback(e,"Checkpoint budget or free-space reserve is exhausted; allocation budget is %llu MiB; no new checkpoint was saved.",(unsigned long long)(budget/(1024*1024)));
+        return -1;
+    }
+
+}
 static int snapshot(MgEngine *e,const char *kind,const char *tag) {
-    char args[512],disk_dir[1024];
+    char args[2048];
 Buffer b;
 uint64_t deadline;
-int result;
+int result,reuse_attempt=0;
+int index;
 
     if(!e->snapshot_supported){feedback(e,"This VM cannot capture reversible RAM and disk state. Use a managed qcow2 disk and QEMU snapshot support.");
 return -1;
 }
+    if(!e->snapshot_catalog_available){feedback(e,"Checkpoint operation refused because QEMU's existing checkpoint catalog could not be verified. The VM remains available; existing states were not assumed empty.");return -1;}
     if(e->job_active){feedback(e,"Snapshot job is still running; new mutations wait for its confirmed completion.");
 return -1;
 }
-    if(!valid_name(tag)){feedback(e,"Step name accepts 1-63 letters, numbers, '.', '_' and '-'.");
+    if(!tag||!tag[0]||strlen(tag)>=SNAPSHOT_TAG_CAP){feedback(e,"Checkpoint QMP name exceeds its bounded 127-byte limit.");
 return -1;
 }
     if(!strcmp(kind,"snapshot-save")){
-        if(snapshot_find(e,tag)>=0){feedback(e,"This checkpoint name already exists; choose another name.");
+        if(snapshot_find_tag(e,tag)>=0){feedback(e,"This checkpoint QMP name already exists; choose another name.");
 return -1;
 }
-        if(e->snapshot_count==SNAPSHOT_CAP){char oldest[64];
-strcpy(oldest,e->snapshots[0].name);
-if(snapshot(e,"snapshot-delete",oldest))return -1;
-}
-        snprintf(disk_dir,sizeof(disk_dir),"%s",e->cfg.disk);
-{char *p=strrchr(disk_dir,'/');
-
-#ifdef _WIN32
-            char *q=strrchr(disk_dir,'\\');
-if(q&&(!p||q>p))p=q;
-
-#endif
-            if(p)*p=0;
-else strcpy(disk_dir,".");
-}
-        if(mgp_disk_free(disk_dir)<FREE_RESERVE+(uint64_t)e->cfg.ram_mb*1024*1024||mgp_file_size(e->cfg.disk)>e->disk_base+SNAPSHOT_BUDGET){feedback(e,"Checkpoint budget is exhausted. Export older work or increase available disk space; guest work was not modified.");
+        if(e->snapshot_count>=SNAPSHOT_CATALOG_CAP&&snapshot_owned_count(e)==0){feedback(e,"The bounded 64-entry checkpoint catalog is full of existing states; no history was dropped and no new checkpoint was saved.");return -1;}
+        result=snapshot_make_room(e,NULL,1,1);
+if(result<0)return -1;
+reuse_attempt=result>0;
+    }else {
+        index=snapshot_find_tag(e,tag);
+        if(index<0){feedback(e,"Checkpoint is not in the verified QEMU catalog. The forensic journal is preserved.");
 return -1;
-}
-    }else if(snapshot_find(e,tag)<0){feedback(e,"Checkpoint is not retained in this owner session. The forensic journal is preserved.");
-return -1;
+        }
+        if(!strcmp(kind,"snapshot-load")&&!e->snapshots[index].restorable){feedback(e,"This checkpoint is disk-only or has no verified VM state; Megas will not claim it can restore running RAM and devices.");return -1;}
+        if(!strcmp(kind,"snapshot-delete")&&!e->snapshots[index].owned){feedback(e,"Foreign checkpoint '%s' is protected from automatic deletion.",e->snapshots[index].name);return -1;}
 }
     snprintf(e->job_id,sizeof(e->job_id),"megas-job-%llu",(unsigned long long)++e->snapshot_serial);
 
@@ -834,12 +1135,60 @@ return -1;
     deadline=e->job_started+COMMAND_MS;
 
     while(mgp_now()<deadline){result=snapshot_poll(e);
-if(result)return result>0?0:-1;
+if(result){
+    if(result>0&&!strcmp(kind,"snapshot-save")){
+        int post_room;
+        if(reuse_attempt){uint64_t allocated=0,free_bytes=0;
+            post_room=snapshot_room(e,0,&allocated,&free_bytes);
+            if(post_room==0)feedback(e,"One bounded checkpoint reuse attempt did not bring allocated-size or free space within budget.");
+        }else post_room=snapshot_make_room(e,tag,0,0)?0:1;
+        if(post_room<=0){
+            char reason[512],cleanup[512];
+            snprintf(reason,sizeof(reason),"%.511s",e->status.feedback);
+            if(snapshot_find_tag(e,tag)>=0){
+                if(!e->late_id&&!snapshot(e,"snapshot-delete",tag))
+                    feedback(e,"Checkpoint '%s' was confirmed but removed because post-save budget verification failed: %.280s",e->job_snapshot_name,reason);
+                else {
+                    snprintf(cleanup,sizeof(cleanup),"%.511s",e->status.feedback);
+                    feedback(e,"Checkpoint '%s' was confirmed, but post-save budget verification failed and its removal is unconfirmed. Inspect the retained checkpoint list and audit journal. Verification: %.150s Removal: %.150s",e->job_snapshot_name,reason,cleanup);
+                }
+            }
+            return -1;
+        }
+    }
+    return result>0?0:-1;
+}
 display_tick(e);
 mgp_sleep(20);
 }
     feedback(e,"Snapshot is still working after 4.5 seconds. It remains visible and new mutations are held until completion.");
 return -1;
+
+}
+static int snapshot_save(MgEngine *e,const char *requested,int automatic,char *saved_name,size_t saved_capacity) {
+    char name[64],tag[SNAPSHOT_TAG_CAP],base[64];
+    unsigned suffix;
+    size_t prefix_len=strlen(SNAPSHOT_MANAGED_PREFIX);
+    if(!valid_name(requested)){feedback(e,"Checkpoint name accepts 1-63 letters, numbers, '.', '_' and '-'.");return -1;}
+    snprintf(base,sizeof(base),"%s",requested);
+    for(suffix=1;suffix<1000000;suffix++){
+        if(suffix==1)snprintf(name,sizeof(name),"%s",base);
+        else {
+            char tail[16];size_t tail_len,base_len;
+            snprintf(tail,sizeof(tail),"-%u",suffix);tail_len=strlen(tail);
+            base_len=strlen(base);if(base_len+tail_len>=sizeof(name))base_len=sizeof(name)-tail_len-1;
+            memcpy(name,base,base_len);memcpy(name+base_len,tail,tail_len+1);
+        }
+        if(prefix_len+strlen(name)>=sizeof(tag)){feedback(e,"Checkpoint name cannot fit the managed QMP name bound.");return -1;}
+        snprintf(tag,sizeof(tag),"%s%s",SNAPSHOT_MANAGED_PREFIX,name);
+        if(snapshot_find(e,name)<0&&snapshot_find_tag(e,tag)<0)break;
+        if(!automatic){feedback(e,"This checkpoint name already exists; choose another name.");return -1;}
+    }
+    if(suffix==1000000){feedback(e,"No unique automatic checkpoint name is available in the bounded catalog.");return -1;}
+    snprintf(e->job_snapshot_name,sizeof(e->job_snapshot_name),"%s",name);
+    e->job_snapshot_owned=1;
+    if(saved_name&&saved_capacity)snprintf(saved_name,saved_capacity,"%s",name);
+    return snapshot(e,"snapshot-save",tag);
 
 }
 static int export_live(MgEngine *e) {
@@ -1355,7 +1704,8 @@ static int vm_start(MgEngine *e,Json *j) {
     char *argv[48];
 int n=0;
 Buffer b;
-const char *extension;
+    const char *extension;
+char checkpoint_status[192];
 int login_enabled=e->cfg.passwordless;
 #define VM_START_FAIL() do { wipe_memory(password,sizeof(password)); return -1; } while (0)
 
@@ -1491,8 +1841,10 @@ argv[n++]=bios;
 argv[n++]=data_dir;
 }
     argv[n]=NULL;
-e->disk_base=mgp_file_size(e->cfg.disk);
+e->disk_base=0;
+e->disk_base_known=0;
 e->snapshot_count=0;
+e->snapshot_catalog_available=0;
 
     {char command[REQUEST_CAP];
 Buffer audit;
@@ -1513,10 +1865,23 @@ strcpy(e->status.phase,"starting");
 
     if(!qmp_exec(e,"query-commands",NULL,500)){e->snapshot_supported=e->snapshot_supported&&has_command(e,"snapshot-save")&&has_command(e,"snapshot-load");
 }
-    if(mg_rfb_connect(e->display,"127.0.0.1",e->cfg.vnc_port,error,sizeof(error)))feedback(e,"VM started; live display is connecting: %s",error);
+    if(e->snapshot_supported){
+        char baseline[128];
+        if(!snapshot_disk_allocated(e,&e->disk_base,1)){
+            e->disk_base_known=1;
+            snprintf(baseline,sizeof(baseline),"QMP megasdisk allocated-size baseline=%llu bytes",(unsigned long long)e->disk_base);
+            journal(e,"checkpoint_budget_baseline",baseline);
+        }else journal(e,"checkpoint_budget_metric_unavailable","QEMU did not report one valid allocated-size for the managed megasdisk qcow2 node at startup.");
+    }
+    if(e->snapshot_supported){
+        if(!e->snapshot_catalog_available)snprintf(checkpoint_status,sizeof(checkpoint_status),"Checkpoint catalog unavailable; existing QEMU states were not assumed empty and saves/restores are disabled.");
+        else if(e->disk_base_known)snprintf(checkpoint_status,sizeof(checkpoint_status),"Checkpoint catalog verified; allocation budget: %llu MiB (minimum 2048 MiB, scales with RAM).",(unsigned long long)(snapshot_budget_bytes(e)/(1024*1024)));
+        else snprintf(checkpoint_status,sizeof(checkpoint_status),"Existing checkpoints were imported; new saves are unavailable because disk allocation could not be verified.");
+    }else snprintf(checkpoint_status,sizeof(checkpoint_status),"Manual checkpoints require a qcow2 disk and snapshot-capable QEMU.");
+    if(mg_rfb_connect(e->display,"127.0.0.1",e->cfg.vnc_port,error,sizeof(error)))feedback(e,"VM started; live display is connecting: %.300s. %.180s",error,checkpoint_status);
 
     else {display_tick(e);
-feedback(e,"VM started. Live display is connected. %s",e->snapshot_supported?"A confirmed manual checkpoint can restore this VM.":"Manual checkpoints require a qcow2 disk and snapshot-capable QEMU.");
+feedback(e,"VM started. Live display is connected. %s",checkpoint_status);
 }
     refresh_state(e);
     if (e->cfg.seed_iso[0]) {
@@ -1692,9 +2057,9 @@ bstr(&b,action);
 bput(&b,",\"state\":{\"phase\":");
 bstr(&b,e->status.phase);
 
-    bfmt(&b,",\"connected\":%s,\"running\":%s,\"owned_pid\":%d,\"observed_width\":%u,\"observed_height\":%u,\"requested_width\":%u,\"requested_height\":%u,\"frame_generation\":%llu,\"fresh_state_age_ms\":%llu,\"snapshot_busy\":%s,\"uncertain_command\":%s,\"rollback_available\":%s,\"automatic_checkpoints\":%s,\"retained_checkpoints\":%u,\"last_restore_ms\":%.0f,\"guest_job\":{\"active\":%s,\"kind\":",
+    bfmt(&b,",\"connected\":%s,\"running\":%s,\"owned_pid\":%d,\"observed_width\":%u,\"observed_height\":%u,\"requested_width\":%u,\"requested_height\":%u,\"frame_generation\":%llu,\"fresh_state_age_ms\":%llu,\"snapshot_busy\":%s,\"uncertain_command\":%s,\"rollback_available\":%s,\"automatic_checkpoints\":%s,\"retained_checkpoints\":%u,\"owned_checkpoints\":%u,\"checkpoint_catalog_available\":%s,\"checkpoint_budget_bytes\":%llu,\"checkpoint_budget_baseline_available\":%s,\"last_restore_ms\":%.0f,\"guest_job\":{\"active\":%s,\"kind\":",
         e->status.connected?"true":"false",e->status.running?"true":"false",e->status.owned_pid,e->status.width,e->status.height,e->cfg.width,e->cfg.height,(unsigned long long)e->status.frame_generation,
-        (unsigned long long)(e->last_state?mgp_now()-e->last_state:0),e->job_active?"true":"false",e->late_id?"true":"false",e->snapshot_supported?"true":"false",e->auto_checkpoint?"true":"false",e->snapshot_count,e->status.last_restore_ms,e->guest_active?"true":"false");
+        (unsigned long long)(e->last_state?mgp_now()-e->last_state:0),e->job_active?"true":"false",e->late_id?"true":"false",(e->snapshot_supported&&e->snapshot_catalog_available)?"true":"false",e->auto_checkpoint?"true":"false",e->snapshot_count,snapshot_owned_count(e),e->snapshot_catalog_available?"true":"false",(unsigned long long)(e->snapshot_supported?snapshot_budget_bytes(e):0),e->disk_base_known?"true":"false",e->status.last_restore_ms,e->guest_active?"true":"false");
     bstr(&b,e->guest_kind);
     bfmt(&b,",\"guest_pid\":%llu,\"automatic_pending\":%s,\"progress\":",(unsigned long long)e->guest_pid,e->guest_auto_pending?"true":"false");
     bstr(&b,e->guest_progress);
@@ -1730,7 +2095,7 @@ bstr(&b,e->status.repair_prompt);
 for(i=0;i<e->snapshot_count;i++){if(i)bput(&b,",");
 bput(&b,"{\"name\":");
 bstr(&b,e->snapshots[i].name);
-bfmt(&b,",\"step\":%llu}",(unsigned long long)e->snapshots[i].step);
+bfmt(&b,",\"step\":%llu,\"owned\":%s,\"restorable\":%s}",(unsigned long long)e->snapshots[i].step,e->snapshots[i].owned?"true":"false",e->snapshots[i].restorable?"true":"false");
 }bput(&b,"],\"recent_steps\":[");
 
         for(i=0;i<e->history_count;i++){unsigned index=(e->history_next+HISTORY_CAP-e->history_count+i)%HISTORY_CAP;
@@ -1775,7 +2140,6 @@ e->status.owned_pid=0;
 e->status.running=0;
 e->job_active=0;
 e->late_id=0;
-e->snapshot_count=0;
     if(e->guest_active){journal(e,"guest_job_cancelled","VM stopped before the guest helper confirmed completion.");mg_guest_clear(&e->guest);e->guest_active=0;}
     e->guest_auto_pending=0;e->guest_auto_running=0;
     wipe_memory(e->guest_auto_password,sizeof(e->guest_auto_password));
@@ -1895,8 +2259,9 @@ static int guest_job_start(MgEngine *e,Json *j,const char *kind,History *history
         if(config_string(j,"wad",wad,sizeof(wad))){feedback(e,"Doom WAD path exceeds its supported size.");goto invalid;}
     }
     if(e->auto_checkpoint&&e->snapshot_supported){
-        snprintf(history->before,sizeof(history->before),"step-%llu-before",(unsigned long long)history->step);
-        if(snapshot(e,"snapshot-save",history->before))goto invalid;
+        char desired[64];
+        snprintf(desired,sizeof(desired),"step-%llu-before",(unsigned long long)history->step);
+        if(snapshot_save(e,desired,1,history->before,sizeof(history->before)))goto invalid;
         e->guest_checkpoint=1;
     }else e->guest_checkpoint=0;
     if(!strcmp(kind,"password")){
@@ -1950,9 +2315,9 @@ static void guest_job_tick(MgEngine *e)
      * in this gap so no guest helper bytes are uploaded before the checkpoint. */
     if(!result&&was_auto&&e->guest.uncertain&&!e->guest_checkpoint&&
        e->auto_checkpoint&&e->snapshot_supported){
-        char before[64];
-        snprintf(before,sizeof(before),"step-%llu-before",(unsigned long long)e->guest_auto_step);
-        if(snapshot(e,"snapshot-save",before)){
+        char before[64],desired[64];
+        snprintf(desired,sizeof(desired),"step-%llu-before",(unsigned long long)e->guest_auto_step);
+        if(snapshot_save(e,desired,1,before,sizeof(before))){
             char reason[512];snprintf(reason,sizeof(reason),"%.511s",e->status.feedback);
             journal(e,"guest_auto_checkpoint_failed","Automatic guest policy stopped before helper upload because its before checkpoint was not confirmed.");
             mg_guest_clear(&e->guest);e->guest_active=0;e->guest_auto_running=0;
@@ -1977,9 +2342,9 @@ static void guest_job_tick(MgEngine *e)
             feedback(e,"Guest helper completed with confirmed exit status; the saved sign-in policy was restored, while the account password state was not changed or inferred.");
         else feedback(e,"Guest %s completed successfully; guest PID %llu confirmed.",e->guest_kind,(unsigned long long)e->guest_pid);
         if(e->guest_checkpoint){
-            char after[64];
-            snprintf(after,sizeof(after),"step-%llu-after",(unsigned long long)e->guest_step);
-            if(snapshot(e,"snapshot-save",after)){
+        char after[64],desired[64];
+            snprintf(desired,sizeof(desired),"step-%llu-after",(unsigned long long)e->guest_step);
+            if(snapshot_save(e,desired,1,after,sizeof(after))){
                 char reason[512];snprintf(reason,sizeof(reason),"%.511s",e->status.feedback);
                 feedback(e,"Guest %s completed, but its after-checkpoint is unconfirmed: %s",e->guest_kind,reason);
             }else history_after_checkpoint(e,e->guest_step,after);
@@ -2249,16 +2614,20 @@ goto done;
         else if(jstring(j,jget(j,0,"name"),name,sizeof(name))){feedback(e,"Checkpoint name is missing or too long.");
 goto done;
 }
-        ok=snapshot(e,"snapshot-save",name);
+        ok=snapshot_save(e,name,0,NULL,0);
 if(!ok)feedback(e,"Checkpoint '%s' captured RAM, device state and disk state.",name);
 goto done;
 
     }
     if(!strcmp(action,"restore")){
+        int checkpoint_index;
+        if(!e->snapshot_catalog_available){feedback(e,"Restore refused because QEMU's existing checkpoint catalog could not be verified. The VM remains available; no state was assumed empty.");ok=-1;goto done;}
         if(jstring(j,jget(j,0,"name"),name,sizeof(name))){feedback(e,"Choose a retained checkpoint name from steps.");
 goto done;
 }
-        ok=snapshot(e,"snapshot-load",name);
+        checkpoint_index=snapshot_find(e,name);
+        if(checkpoint_index<0){feedback(e,"Choose a checkpoint from the verified QEMU catalog shown in steps.");ok=-1;goto done;}
+        ok=snapshot(e,"snapshot-load",e->snapshots[checkpoint_index].tag);
 if(!ok)feedback(e,"Checkpoint '%s' restored and confirmed in %.0f ms.",name,e->status.last_restore_ms);
 goto done;
 
@@ -2290,8 +2659,8 @@ goto done;
         if(!e->status.running && (!strcmp(action,"type") || !strcmp(action,"click") || !strcmp(action,"pointer") || !strcmp(action,"key")) && !jeq(j,jget(j,0,"down"),"false")) {feedback(e,"The VM is paused; resume it before input so keys are not discarded.");goto done;}
         capture=e->auto_checkpoint&&e->snapshot_supported&&!jeq(j,jget(j,0,"checkpoint"),"false");
 
-        if(capture){snprintf(h->before,sizeof(h->before),"step-%llu-before",(unsigned long long)h->step);
-if(snapshot(e,"snapshot-save",h->before))goto done;
+        if(capture){char desired[64];snprintf(desired,sizeof(desired),"step-%llu-before",(unsigned long long)h->step);
+if(snapshot_save(e,desired,1,h->before,sizeof(h->before)))goto done;
 }
         if(!strcmp(action,"pause"))ok=qmp_exec(e,"stop",NULL,COMMAND_MS);
 
@@ -2349,8 +2718,8 @@ goto done;
         }
         if(!ok){feedback(e,"Action '%s' was delivered; current VM state and live display follow.",action);
 
-            if(capture){snprintf(h->after,sizeof(h->after),"step-%llu-after",(unsigned long long)h->step);
-if(snapshot(e,"snapshot-save",h->after)){char reason[512];
+            if(capture){char desired[64];snprintf(desired,sizeof(desired),"step-%llu-after",(unsigned long long)h->step);
+if(snapshot_save(e,desired,1,h->after,sizeof(h->after))){char reason[512];
 strcpy(reason,e->status.feedback);
 feedback(e,"Action ran, but its after-checkpoint is unconfirmed: %s",reason);
 ok=-1;

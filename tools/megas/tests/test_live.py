@@ -582,9 +582,96 @@ def main():
             wait_for(lambda: (h if (h := capture('reset')) != hash_b else None),
                      'Reset did not change actual guest framebuffer')
             passed('reset_changes_actual_guest_display')
+            # A replacement controller must import the qcow2 snapshot catalog and
+            # restore states created by the previous owner before making new work.
+            previous_owner_pid = owned_pid
+            owner.terminate()
+            owner.wait(timeout=10)
+            wait_for(lambda: not pid_alive(previous_owner_pid),
+                     'Previous owner exit orphaned QEMU before catalog handoff')
+            owner_log.close()
+            control_port, qmp_port, vnc_port = available_ports(3)
+            common = [str(binary), '--runtime', str(runtime), '--port', str(control_port),
+                      '--qmp-port', str(qmp_port), '--vnc-port', str(vnc_port)]
+            owner_log = (runtime / 'owner-restarted.log').open('w')
+            owner = subprocess.Popen(common + ['serve'], stdout=owner_log, stderr=owner_log)
+            token = runtime / f'session-{control_port}.token'
+            wait_for(lambda: token.is_file() and token.stat().st_size > 0,
+                     'Replacement owner credential was not created')
+            wait_for(lambda: send({'action': 'status'}).get('ok'),
+                     'Replacement owner did not start')
+            send({'action': 'start', 'disk': str(disk), 'qemu': qemu,
+                  'ram_mb': 64, 'width': 800, 'height': 600})
+            wait_for(lambda: send({'action': 'status'})['state'].get('frame_generation', 0) > 0,
+                     'Replacement owner did not receive the live framebuffer', seconds=15)
+            restarted_status = send({'action': 'status'})
+            owned_pid = restarted_status['state']['owned_pid']
+            require(owned_pid > 0 and pid_alive(owned_pid),
+                    'Replacement owner did not manage a live QEMU child')
+            require(restarted_status['state'].get('checkpoint_catalog_available') is True,
+                    'Replacement owner did not verify the existing QEMU checkpoint catalog')
+            imported = send({'action': 'steps'})
+            imported_checkpoints = imported.get('checkpoints', [])
+            imported_by_name = {entry.get('name'): entry for entry in imported_checkpoints}
+            for name in ('past', 'future'):
+                entry = imported_by_name.get(name)
+                require(entry and entry.get('owned') is True and entry.get('restorable') is True,
+                        f'Replacement owner did not import restorable managed checkpoint {name!r}')
+            imported_names = [entry.get('name') for entry in imported_checkpoints]
+            require(imported_names.index('past') < imported_names.index('future'),
+                    'QEMU catalog order did not preserve past-before-future save order')
+            automatic_pairs = set()
+            for name in imported_names:
+                if not name or not name.startswith('step-'):
+                    continue
+                step, separator, edge = name[5:].partition('-')
+                if separator and step.isdecimal() and edge in ('before', 'after'):
+                    automatic_pairs.add((int(step), edge))
+            paired_steps = sorted({step for step, edge in automatic_pairs
+                                   if (step, 'before') in automatic_pairs and
+                                   (step, 'after') in automatic_pairs})
+            require(paired_steps,
+                    'Replacement owner did not import any complete automatic checkpoint pair')
+            collision_step = max(paired_steps)
+            current_actions = imported['statistics']['actions']
+            require(collision_step > current_actions,
+                    f'No imported automatic checkpoint label is ahead of the replacement action counter: '
+                    f'{collision_step} <= {current_actions}')
+            while current_actions + 1 < collision_step:
+                current_actions = send({'action': 'status'})['statistics']['actions']
+            require(current_actions + 1 == collision_step,
+                    'Could not align the post-restart native action with an imported logical checkpoint name')
+            send({'action': 'pause'})
+            after_reowner_action = send({'action': 'steps'})
+            after_names = {entry.get('name') for entry in after_reowner_action.get('checkpoints', [])}
+            require(f'step-{collision_step}-before-2' in after_names and
+                    f'step-{collision_step}-after-2' in after_names,
+                    'Post-restart automatic action overwrote or failed to suffix its imported checkpoint labels')
+            cross_owner_restores = []
+            for name, expected in (('past', hash_a), ('future', hash_b)):
+                send({'action': 'restore', 'name': name})
+                actual = wait_for(lambda: (h if (h := capture('cross-owner-restored-' + name)) == expected else None),
+                                  f'Replacement owner did not restore the previous owner\'s {name} pixels',
+                                  seconds=5)
+                cross_owner_restores.append({'checkpoint': name, 'pixel_sha256': actual})
+            report['measurements']['replacement_owner_after_restores_rss_kib'] = rss_kib(owner.pid, os.getpid())
+            report['measurements']['checkpoint_reowner'] = {
+                'catalog_available': restarted_status['state'].get('checkpoint_catalog_available'),
+                'imported_managed_checkpoints': sum(1 for item in imported_checkpoints
+                                                    if item.get('owned') is True),
+                'past_precedes_future_in_qmp_catalog': True,
+                'automatic_collision_step': collision_step,
+                'new_before_label': f'step-{collision_step}-before-2',
+                'new_after_label': f'step-{collision_step}-after-2',
+                'cross_owner_pixel_restores': cross_owner_restores,
+            }
+            passed('checkpoint_catalog_reimport_and_unique_automatic_action_after_owner_restart',
+                   collision_step=collision_step)
+            passed('past_future_pixels_restored_after_owner_restart', restores=cross_owner_restores)
             # Screenshot output and controller RSS must stay bounded, with no frame queue.
             report['measurements']['png'] = screenshots['future']
-            for key in ('owner_idle_rss_kib', 'owner_live_rss_kib', 'owner_after_restores_rss_kib'):
+            for key in ('owner_idle_rss_kib', 'owner_live_rss_kib', 'owner_after_restores_rss_kib',
+                        'replacement_owner_after_restores_rss_kib'):
                 value = report['measurements'][key]
                 if os.name == 'nt':
                     require(value is not None,

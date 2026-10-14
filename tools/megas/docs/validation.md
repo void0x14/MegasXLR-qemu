@@ -61,12 +61,14 @@ run. The controller's observed RSS was 1,016 KiB idle, 2,512 KiB live and
 
 The controller keeps one current RFB framebuffer rather than a frame queue.
 The reviewed source limits the RFB image to 4,194,304 pixels, each dimension
-to 4,096, its input/output scratch buffers to 16/8 KiB, checkpoint metadata
-to 16 retained names, in-memory history to 128 actions, and mutations stop
+to 4,096, its input/output scratch buffers to 16/8 KiB, and the checkpoint
+catalog to 64 entries total. Automatic garbage collection retains at most 16
+controller-owned checkpoints; foreign checkpoints are never automatically
+collected. In-memory history is limited to 128 actions, and mutations stop
 when the journal reaches 64 MiB. The OCR child is limited to 48 MiB, 8 CPU
 seconds, a 10-second wall deadline and 4,096 bytes of returned text. This run
 exercised normal use and OCR memory sampling; it did not fill the journal to
-its cap or force checkpoint eviction at the 16-checkpoint boundary.
+its cap or trigger eviction at the 16-owned-checkpoint retention limit.
 
 `tests/test_platform.c` passed natively. It checks exclusive file creation
 without overwriting an existing file, literal argv delivery with spaces,
@@ -104,7 +106,7 @@ warnings, mostly whitespace, brace and line-length style diagnostics from the
 fork's compact formatting. Review of the non-format findings found no concrete
 functional defect; no broad style rewrite was made.
 
-## Validation follow-up — 2026-10-14
+## Historical validation follow-up — 2026-10-14 (before checkpoint catalog update)
 
 The Windows Server 2022 native CI job (`38452749483`, job `115487561860`)
 passed all 15 live-QEMU checks, the platform process test, the NoCloud seed
@@ -147,3 +149,34 @@ is the OCR process. This keeps the OpenMP worker allocations within the
 existing `RLIMIT_DATA` budget while leaving the controller environment and
 48 MiB RSS watchdog unchanged. The post-fix Actions rerun and Windows RSS
 sampler CI check are still pending; this local pass does not replace them.
+
+## Checkpoint budget and re-owner validation — 2026-10-14
+
+Checkpoint allocation is measured from QEMU's `actual-size` for the exact
+`megasdisk` qcow2 node, relative to the startup baseline. The growth budget is
+`max(2 GiB, 2 × configured VM RAM + 64 MiB)`. Before a save, the controller
+reserves configured VM RAM within that budget and requires at least 512 MiB
+plus configured VM RAM of host filesystem free space. It remeasures after each
+oldest-owned deletion. The catalog is bounded to 64 entries total, with at
+most 16 Megas-owned checkpoints retained; foreign checkpoints are never
+automatically deleted. QMP tags use the internal `megas-owned:` prefix while
+display labels stay unchanged. Re-imported foreign checkpoints can be
+explicitly restored only when QEMU reports saved VM state; disk-only entries
+are listed as non-restorable.
+
+The local Linux `make test` run passed all engine budget/catalog cases, the
+bundle tests (8 passed, 1 skipped), all 17 live-QEMU checks, and the agent
+stdio test. The engine tests cover allocation pressure and bounded eviction,
+the 16-owned/64-total limits, preservation of foreign labels including the
+legacy `megas-owned-important`, and fail-closed handling of unknown or
+malformed checkpoint state. The live tests used QEMU 8.2.2 on Linux TCG. A
+replacement controller imported all 16 owned checkpoints in QMP order, chose
+unique `step-46-before-2` and `step-46-after-2` labels when action 46 collided
+with imported history, then restored `past` and `future` from the previous
+owner. Both post-restart pixel hashes matched their original guest states:
+`dab5ed8f3335b5bdd5570b85ee0ae33402df94cf50f35bb6b068c87f22e6935a` and
+`8ae59fdc05ab358df03dc2850ce508ae0044b54c7e97c93936f53e1452e585ff`.
+Tesseract returned 58 bytes for current image generation 8 and sampled a peak
+of 30,134,272 bytes, below 48 MiB. GitHub Actions for this checkpoint update
+were still pending when this local validation was recorded; the historical CI
+results above do not validate the checkpoint catalog changes.

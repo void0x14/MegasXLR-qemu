@@ -19,6 +19,13 @@ Requests use `action` (aliases: `command`, `cmd`). Actions:
 * `password`: enabled boolean; guest account policy requires supported guest helper.
 * `repair`: copyable forensic repair prompt; `harness`: name and prompt.
 
+QMP snapshot tags for controller-owned checkpoints use the reserved
+`megas-owned:` prefix; the prefix is internal, and displayed checkpoint labels
+remain unchanged. Existing snapshots with valid legacy labels such as
+`megas-owned-important` remain foreign checkpoints: they stay readable and
+restorable when their state is available, and are never automatically
+garbage-collected.
+
 No action may claim success on a QEMU error. Unknown actions return a repair
 prompt and current state without killing the controller. Logs are append-only
 JSONL and include requested/normalized action, result, timestamps and events.

@@ -107,8 +107,25 @@ maliyet artar. Ölçülmüş değerler [validation.md](validation.md) içindedir
 Kayıtlı durum değiştirme için hedef 5 saniyedir. İşlem sırasında bu hedef
 ve ölçülen süre görünür. Büyük VM belleği, yavaş disk veya işletim sistemi
 baskısı altında genel bir 5 saniye garantisi yoktur. Önceki kayıtlı durumlar
-varsa ileri/geri geçiş tekrar komut oynatmadan yapılır; kayıtlı durumların
-disk alanı da sınırlanmalıdır. Günlük, kayıtlı durumların dışında korunur.
+varsa ileri/geri geçiş tekrar komut oynatmadan yapılır.
+
+Checkpoint alanı, yönetilen qcow2 diskin QEMU tarafından bildirilen ayrılmış
+`actual-size` büyümesine göre sınırlandırılır. Bütçe şu formülle belirlenir:
+`max(2 GiB, 2 × yapılandırılmış VM RAM'i + 64 MiB)`. Yeni bir durum kaydedilirken
+bu bütçede yapılandırılmış VM RAM'i için yer ayrılır; ayrıca diskin bulunduğu
+dosya sisteminde en az `512 MiB + yapılandırılmış VM RAM'i` boş alan tutulur.
+Baskı oluşursa en eski Megas kayıtlı durumları sırayla silinip alan yeniden
+ölçülür; yer açılamazsa yeni durum başarısız bildirilir.
+
+QMP'deki Megas kayıtlı durum etiketleri dahili `megas-owned:` önekiyle
+saklanır; kullanıcıya gösterilen adlarda bu önek görünmez. Megas en fazla 16
+kendi durumunu saklar ve toplam katalog 64 kayıtla sınırlıdır. Önceki bir
+Megas denetleyicisinin durumları yeniden açılışta içe aktarılır. Yabancı
+durumlar otomatik silinmez; QEMU kayıtlı VM belleği bulunduğunu doğruluyorsa
+kullanıcı bunları açıkça geri yükleyebilir. Örneğin `megas-owned-important`
+geçerli eski bir addır ve yabancı durum olarak kalır. Yalnızca disk durumu
+içeren kayıtlar listelenebilir ancak VM'in tam RAM ve aygıt durumunu geri
+yükleyemez. Günlük, kayıtlı durumların dışında korunur.
 
 ## Geliştirici için derleme
 

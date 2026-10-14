@@ -33,7 +33,12 @@
 #include <unistd.h>
 #endif
 
-enum { GUI_MAX_W = 2048, GUI_MAX_H = 1280, GUI_MAX_FILES = 256 };
+enum {
+    GUI_MAX_W = 2048,
+    GUI_MAX_H = 1280,
+    GUI_MAX_FILES = 256,
+    GUI_MAX_CHECKPOINTS = 64,
+};
 typedef struct {
     MgEngine *engine;
     struct nk_context *ctx;
@@ -52,7 +57,7 @@ typedef struct {
     struct nk_text_edit editors[8];
     char editor_memory[8][1024], editor_shadow[8][1024];
     unsigned editor_ready;
-    char checkpoints[32][64];
+    char checkpoints[GUI_MAX_CHECKPOINTS][64];
     int checkpoint_count;
     uint32_t held_keys[256];
     unsigned buttons;
@@ -718,7 +723,8 @@ static void gui_steps(MgGui *ui)
     struct nk_context *ctx = ui->ctx;
     const MgStatus *s = mg_engine_status(ui->engine);
     char text[256]; int i;
-    ui->checkpoint_count = (int)mg_engine_checkpoints(ui->engine, ui->checkpoints, 32);
+    ui->checkpoint_count = (int)mg_engine_checkpoints(ui->engine, ui->checkpoints,
+                                                       GUI_MAX_CHECKPOINTS);
     nk_layout_row_dynamic(ctx, ui->row*2.4f, 1);
     nk_label_wrap(ctx, tr("Her komut kaydedilir. Dönmek istediğiniz durumu kaydedin; geri veya ileri geçiş için kayıt adını seçin.",
                          "Every command is recorded. Save states you want to revisit, then select a saved state to go back or forward."));

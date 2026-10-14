@@ -142,6 +142,9 @@ jobs:
           New-Item -ItemType File -Path $log | Out-Null
           $destination = Join-Path $root 'installed\Megas'
           $menuShortcut = $null
+          $guiProcess = $null
+          $guiOutput = Join-Path $root 'gui.stdout.log'
+          $guiError = Join-Path $root 'gui.stderr.log'
           try {
             $archive = Join-Path $env:GITHUB_WORKSPACE 'tools\megas\build\bundle.zip'
             Add-Content -LiteralPath $log -Value "> Expand-Archive $archive"
@@ -194,12 +197,61 @@ jobs:
             Invoke-Smoke $env:MEGAS_TESSERACT @('--version')
             Invoke-Smoke (Join-Path $destination 'ocr\tesseract.exe') @('--list-langs')
             if (-not (Select-String -LiteralPath $log -Pattern '^eng$' -Quiet)) { throw 'Installed Tesseract could not read eng.traineddata' }
-            Write-Host (Get-Content -LiteralPath $log -Raw)
+            $guiExecutable = Join-Path $destination 'megas.exe'
+            $guiRuntime = Join-Path $root 'gui-runtime'
+            New-Item -ItemType Directory -Force -Path $guiRuntime | Out-Null
+            $guiArguments = @('--runtime', ('"{0}"' -f $guiRuntime), 'gui')
+            Add-Content -LiteralPath $log -Value ("> GUI launch: " + $guiExecutable + ' ' + ($guiArguments -join ' '))
+            $guiProcess = Start-Process -FilePath $guiExecutable -ArgumentList $guiArguments -PassThru -WorkingDirectory $work -WindowStyle Normal -RedirectStandardOutput $guiOutput -RedirectStandardError $guiError
+            Add-Content -LiteralPath $log -Value ("GUI PID: " + $guiProcess.Id)
+            $windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+              $guiProcess.Refresh()
+              if ($guiProcess.HasExited) { throw ("GUI process " + $guiProcess.Id + " exited before creating a main window (exit " + $guiProcess.ExitCode + ')') }
+              if ($guiProcess.MainWindowHandle -ne [IntPtr]::Zero) { break }
+              Start-Sleep -Milliseconds 200
+            } while ([DateTime]::UtcNow -lt $windowDeadline)
+            $guiProcess.Refresh()
+            if ($guiProcess.HasExited) { throw ("GUI process " + $guiProcess.Id + " exited before creating a main window (exit " + $guiProcess.ExitCode + ')') }
+            $windowHandle = $guiProcess.MainWindowHandle
+            if ($windowHandle -eq [IntPtr]::Zero) { throw 'Packaged GUI did not create a native main window within 30 seconds' }
+            $workingSet = $guiProcess.WorkingSet64
+            Add-Content -LiteralPath $log -Value ("GUI main window: 0x{0:X}; title: {1}" -f $windowHandle.ToInt64(), $guiProcess.MainWindowTitle)
+            Add-Content -LiteralPath $log -Value ("GUI working set: {0:N1} MiB ({1} bytes)" -f ($workingSet / 1MB), $workingSet)
+            if ($workingSet -ge (100 * 1024 * 1024)) { throw ("Packaged GUI working set exceeded 100 MiB: " + $workingSet + ' bytes') }
+            if (-not $guiProcess.CloseMainWindow()) { throw 'Could not request a normal close of the packaged GUI main window' }
+            if (-not $guiProcess.WaitForExit(10000)) { throw 'Packaged GUI did not exit within 10 seconds after CloseMainWindow' }
+            $guiProcess.Refresh()
+            if ($guiProcess.ExitCode -ne 0) { throw ("Packaged GUI exited with code " + $guiProcess.ExitCode + ' after a normal window close') }
+            Add-Content -LiteralPath $log -Value ("GUI closed normally; PID " + $guiProcess.Id + '; exit code 0')
           } catch {
             Add-Content -LiteralPath $log -Value $_
-            Write-Host (Get-Content -LiteralPath $log -Raw)
             throw
           } finally {
+            if ($guiProcess) {
+              try {
+                $guiProcess.Refresh()
+                if (-not $guiProcess.HasExited) {
+                  Add-Content -LiteralPath $log -Value ("GUI cleanup: force-terminating PID " + $guiProcess.Id + ' after smoke failure')
+                  Stop-Process -Id $guiProcess.Id -Force -ErrorAction SilentlyContinue
+                  [void]$guiProcess.WaitForExit(5000)
+                }
+              } catch {
+                Add-Content -LiteralPath $log -Value ("GUI cleanup error: " + $_)
+              } finally {
+                $guiProcess.Dispose()
+              }
+            }
+            foreach ($outputPath in @($guiOutput, $guiError)) {
+              if (Test-Path -LiteralPath $outputPath) {
+                $outputText = Get-Content -LiteralPath $outputPath -Raw
+                if ($outputText) {
+                  Add-Content -LiteralPath $log -Value ("--- " + (Split-Path -Leaf $outputPath) + ' ---')
+                  Add-Content -LiteralPath $log -Value $outputText
+                }
+              }
+            }
+            Write-Host (Get-Content -LiteralPath $log -Raw)
             if ($menuShortcut -and (Test-Path -LiteralPath $menuShortcut)) { Remove-Item -LiteralPath $menuShortcut -Force -ErrorAction SilentlyContinue }
             if (Test-Path -LiteralPath (Split-Path -Parent $destination)) { Remove-Item -LiteralPath (Split-Path -Parent $destination) -Recurse -Force -ErrorAction SilentlyContinue }
           }
