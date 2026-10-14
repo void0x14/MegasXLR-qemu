@@ -27,7 +27,7 @@ GUI_LIBS = -lX11 -lm
 CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 endif
 
-.PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent bundle
+.PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle bundle
 all: $(BUILD)/megas$(EXE)
 headless: $(BUILD)/megas-headless$(EXE)
 $(BUILD):
@@ -57,12 +57,14 @@ $(BUILD)/test-guest: tests/test_guest.c src/guest.c src/platform.c $(wildcard sr
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -pthread -o "$@" tests/test_guest.c src/guest.c src/platform.c $(LDLIBS)
 test-guest: $(BUILD)/test-guest
 	"./$(BUILD)/test-guest"
-test: test-rfb test-platform test-seed test-engine test-guest test-live test-agent
+test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-live test-agent
 else
 test-engine test-guest:
 	@echo "SKIP: $@ uses POSIX-only test fixtures and is not run on Windows."
-test: test-rfb test-platform test-seed test-live test-agent
+test: test-rfb test-platform test-seed test-bundle test-live test-agent
 endif
+test-bundle:
+	$(PYTHON) tests/test_bundle.py
 test-smoke test-live: headless
 	$(PYTHON) tests/test_live.py "$(BUILD)/megas-headless$(EXE)" --report "$(BUILD)/live-report.json"
 test-agent: headless

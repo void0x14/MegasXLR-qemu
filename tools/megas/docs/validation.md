@@ -103,3 +103,33 @@ and test files (excluding vendored headers) reported 7,693 errors and 345
 warnings, mostly whitespace, brace and line-length style diagnostics from the
 fork's compact formatting. Review of the non-format findings found no concrete
 functional defect; no broad style rewrite was made.
+
+## Validation follow-up — 2026-10-14
+
+The Windows Server 2022 native CI job (`38452749483`, job `115487561860`)
+passed all 15 live-QEMU checks, the platform process test, the NoCloud seed
+test and the agent stdio test. Its four pixel-verified checkpoint restores
+took 309.66–313.62 ms. Tesseract
+returned nonempty text for current image generation 6 and its measured peak
+process memory was 32,931,840 bytes, below the 48 MiB limit. This is Windows
+Server 2022 runner evidence; it does not establish Windows 11 desktop GUI,
+QGA, or Doom end-to-end behavior. The live test now samples Windows process
+working set through the native process-memory API and requires those owner RSS
+measurements to be available.
+
+The latest Linux Actions job (`38452749483`, job `115487561239`) failed the
+required live OCR check. The controller reported `OCR did not produce a
+bounded successful result (exit 1, memory cap 48 MiB); no text was inferred.`
+The nonempty OCR text, current-generation match and 48 MiB measurement remain
+required; this failure is not counted as a pass. On OCR assertion failures,
+`tests/test_live.py` now records the text-only adapter reply before validating
+it and preserves a bounded status excerpt and tail of the combined OCR child
+log in the JSON report, so the captured child diagnostics can identify why
+Tesseract exited unsuccessfully.
+
+A local Linux reproduction then passed all 15 live-QEMU checks with QEMU 8.2.2.
+It produced 58 OCR text bytes for current generation 7 and measured a peak of
+30,056,448 bytes. This local run does not replace or clear the failed Actions
+result above. A separate forced-exit test made a temporary Tesseract wrapper
+write a fixture diagnostic to stderr and exit 1; the failure report retained
+the adapter response, owner status, and bounded OCR log tail before cleanup.

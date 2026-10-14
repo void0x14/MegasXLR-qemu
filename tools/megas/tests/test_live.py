@@ -88,6 +88,47 @@ def host_pid(pid, parent=None):
 
 
 def rss_kib(pid, parent=None):
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessMemoryCountersEx(ctypes.Structure):
+            _fields_ = [
+                ('cb', wintypes.DWORD),
+                ('PageFaultCount', wintypes.DWORD),
+                ('PeakWorkingSetSize', ctypes.c_size_t),
+                ('WorkingSetSize', ctypes.c_size_t),
+                ('QuotaPeakPagedPoolUsage', ctypes.c_size_t),
+                ('QuotaPagedPoolUsage', ctypes.c_size_t),
+                ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t),
+                ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+                ('PagefileUsage', ctypes.c_size_t),
+                ('PeakPagefileUsage', ctypes.c_size_t),
+                ('PrivateUsage', ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        psapi = ctypes.WinDLL('psapi', use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(ProcessMemoryCountersEx), wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x0400, False, pid)  # PROCESS_QUERY_INFORMATION
+        if not handle:
+            return None
+        try:
+            counters = ProcessMemoryCountersEx()
+            counters.cb = ctypes.sizeof(counters)
+            if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                return None
+            return int(counters.WorkingSetSize) // 1024
+        finally:
+            kernel32.CloseHandle(handle)
+
     path = Path(f'/proc/{host_pid(pid, parent)}/status')
     if not path.exists():
         return None
@@ -241,6 +282,42 @@ def main():
                 if ok:
                     require(response.get('ok') is True, f'Command failed: {request}: {response}')
                 return response
+            def record_ocr_failure_diagnostics(reason):
+                # The test guest contains only a fixed public fixture banner and keys.
+                # Preserve a small status/log excerpt before TemporaryDirectory cleanup.
+                diagnostic = {'reason': str(reason)[:512]}
+                try:
+                    current_status = send({'action': 'status'})
+                    ocr_status = current_status.get('ocr', {})
+                    diagnostic['status_excerpt'] = {
+                        'status': ocr_status.get('status'),
+                        'message': str(ocr_status.get('message') or '')[:512],
+                        'generation': ocr_status.get('generation'),
+                        'image_generation': current_status.get('image_generation'),
+                        'pid': ocr_status.get('pid'),
+                        'peak_memory_bytes': ocr_status.get('peak_memory_bytes'),
+                        'text_excerpt': str(ocr_status.get('text') or '')[:512],
+                    }
+                except Exception as error:
+                    diagnostic['status_error'] = f'{type(error).__name__}: {str(error)[:512]}'
+                log_path = runtime / 'ocr.log'
+                try:
+                    log_size = log_path.stat().st_size
+                    with log_path.open('rb') as log_file:
+                        log_file.seek(max(0, log_size - 4096))
+                        log_tail = log_file.read(4096)
+                    diagnostic['ocr_process_log_tail'] = log_tail.decode('utf-8', 'replace')
+                    diagnostic['ocr_process_log_bytes_retained'] = len(log_tail)
+                    diagnostic['ocr_process_log_truncated'] = log_size > len(log_tail)
+                except OSError as error:
+                    diagnostic['ocr_process_log_error'] = f'{type(error).__name__}: {str(error)[:512]}'
+                report.setdefault('diagnostics', {})['ocr_failure'] = diagnostic
+
+            def require_ocr(condition, message):
+                if not condition:
+                    record_ocr_failure_diagnostics(message)
+                require(condition, message)
+
             def raw_request(request):
                 with socket.create_connection(('127.0.0.1', control_port), timeout=5) as sock:
                     sock.sendall((json.dumps(request)+'\n').encode())
@@ -351,23 +428,26 @@ def main():
                             'Adapter state does not identify the current image generation')
                     images = [item for item in content if item['type'] == 'image']
                     if text_only:
-                        require(not images, 'Text-only adapter emitted unsupported image content')
-                        require(len(content) >= 2 and content[1]['type'] == 'text',
-                                'Text-only adapter omitted its OCR result or honest limitation')
-                        ocr_result = content[1]['text']
-                        if tesseract:
-                            require(ocr_result.startswith('Tesseract OCR for live image generation ') or
-                                    ocr_result.startswith('OCR is still running or unavailable within the 1.5-second adapter wait;'),
-                                    f'Installed Tesseract returned neither OCR nor an honest pending result: {ocr_result!r}')
-                        else:
-                            require('OCR' in ocr_result,
-                                    'Text-only adapter did not report a real OCR limitation')
+                        ocr_result = (content[1].get('text', '')
+                                      if len(content) >= 2 and content[1].get('type') == 'text'
+                                      else '')
                         adapter_ocr_observations.append({
                             'request_id': tool_reply['id'],
                             'source_image_generation': state.get('image_generation'),
                             'source_ocr_status': state.get('ocr', {}).get('status'),
                             'result': ocr_result,
                         })
+                        require_ocr(not images,
+                                    'Text-only adapter emitted unsupported image content')
+                        require_ocr(bool(ocr_result),
+                                    'Text-only adapter omitted its OCR result or honest limitation')
+                        if tesseract:
+                            require_ocr(ocr_result.startswith('Tesseract OCR for live image generation ') or
+                                        ocr_result.startswith('OCR is still running or unavailable within the 1.5-second adapter wait;'),
+                                        f'Installed Tesseract returned neither OCR nor an honest pending result: {ocr_result!r}')
+                        else:
+                            require_ocr('OCR' in ocr_result,
+                                        'Text-only adapter did not report a real OCR limitation')
                     else:
                         require(len(images) == 1 and images[0]['mimeType'] == 'image/png',
                                 'Vision adapter omitted current PNG image from a tool response')
@@ -395,17 +475,17 @@ def main():
                         'image_generation': current.get('image_generation'),
                         'pid': ocr.get('pid'), 'peak_memory_bytes': ocr.get('peak_memory_bytes'),
                     }
-                require(ocr.get('status') == 'complete',
-                        f'Tesseract did not complete within its bounded wait: status={ocr.get("status")!r}, '
-                        f'message={ocr.get("message")!r}, generation={ocr.get("generation")!r}, '
-                        f'image_generation={current.get("image_generation")!r}, '
-                        f'peak_memory_bytes={ocr.get("peak_memory_bytes")!r}')
-                require(ocr.get('generation') == current.get('image_generation'),
-                        'OCR result does not match the current image generation')
+                require_ocr(ocr.get('status') == 'complete',
+                            f'Tesseract did not complete within its bounded wait: status={ocr.get("status")!r}, '
+                            f'message={ocr.get("message")!r}, generation={ocr.get("generation")!r}, '
+                            f'image_generation={current.get("image_generation")!r}, '
+                            f'peak_memory_bytes={ocr.get("peak_memory_bytes")!r}')
+                require_ocr(ocr.get('generation') == current.get('image_generation'),
+                            'OCR result does not match the current image generation')
                 peak = ocr.get('peak_memory_bytes')
-                require(isinstance(peak, int) and 0 < peak <= 48 * 1024 * 1024,
-                        f'Observed OCR peak memory is missing or exceeds 48 MiB: {peak!r}')
-                require(bool(ocr.get('text')), 'Completed OCR result contains no text')
+                require_ocr(isinstance(peak, int) and 0 < peak <= 48 * 1024 * 1024,
+                            f'Observed OCR peak memory is missing or exceeds 48 MiB: {peak!r}')
+                require_ocr(bool(ocr.get('text')), 'Completed OCR result contains no text')
                 verify_packet = ''.join(json.dumps(message) + '\n' for message in (
                     {'jsonrpc': '2.0', 'id': 11, 'method': 'initialize',
                      'params': {'protocolVersion': '2025-06-18', 'capabilities': {},
@@ -415,33 +495,36 @@ def main():
                 ))
                 verified = subprocess.run(common + ['agent', '--text-only'], input=verify_packet,
                                            capture_output=True, text=True, timeout=10)
-                require(verified.returncode == 0, f'Verification adapter exited: {verified.stderr}')
+                require_ocr(verified.returncode == 0,
+                            f'Verification adapter exited: {verified.stderr}')
                 verified_replies = [json.loads(line) for line in verified.stdout.splitlines()]
-                require(len(verified_replies) == 2, 'Verification adapter response count invalid')
+                require_ocr(len(verified_replies) == 2,
+                            'Verification adapter response count invalid')
                 verified_content = verified_replies[1]['result']['content']
-                require(verified_content and verified_content[0]['type'] == 'text',
-                        'Verification adapter omitted its owner status')
+                require_ocr(verified_content and verified_content[0]['type'] == 'text',
+                            'Verification adapter omitted its owner status')
                 verified_state = json.loads(verified_content[0]['text'])
-                require(verified_state.get('image_generation') ==
-                        verified_state.get('state', {}).get('frame_generation'),
-                        'Verification adapter state does not identify the current image generation')
-                require(verified_state.get('ocr', {}).get('status') == 'complete' and
-                        verified_state['ocr'].get('generation') == verified_state.get('image_generation'),
-                        'Verification adapter owner status does not contain current completed OCR')
+                require_ocr(verified_state.get('image_generation') ==
+                            verified_state.get('state', {}).get('frame_generation'),
+                            'Verification adapter state does not identify the current image generation')
+                require_ocr(verified_state.get('ocr', {}).get('status') == 'complete' and
+                            verified_state['ocr'].get('generation') == verified_state.get('image_generation'),
+                            'Verification adapter owner status does not contain current completed OCR')
                 verified_text = (verified_content[1].get('text', '')
                                  if len(verified_content) >= 2 and verified_content[1]['type'] == 'text'
                                  else '')
                 ocr_prefix = 'Tesseract OCR for live image generation '
-                require(verified_text.startswith(ocr_prefix),
-                        f'Completed Tesseract result was not returned by text-only adapter: '
-                        f'{verified_text or verified_content!r}')
+                require_ocr(verified_text.startswith(ocr_prefix),
+                            f'Completed Tesseract result was not returned by text-only adapter: '
+                            f'{verified_text or verified_content!r}')
                 adapter_generation = verified_text[len(ocr_prefix):].split(':', 1)[0]
-                require(adapter_generation.isdecimal() and
-                        int(adapter_generation) == verified_state.get('image_generation'),
-                        f'Text-only adapter OCR generation does not match its image: '
-                        f'{adapter_generation!r} vs {verified_state.get("image_generation")!r}')
-                require(bool(verified_text.split('\n', 1)[1].strip()) if '\n' in verified_text else False,
-                        'Text-only adapter returned an empty OCR body after completion')
+                require_ocr(adapter_generation.isdecimal() and
+                            int(adapter_generation) == verified_state.get('image_generation'),
+                            f'Text-only adapter OCR generation does not match its image: '
+                            f'{adapter_generation!r} vs {verified_state.get("image_generation")!r}')
+                require_ocr(bool(verified_text.split('\n', 1)[1].strip())
+                            if '\n' in verified_text else False,
+                            'Text-only adapter returned an empty OCR body after completion')
                 report['measurements']['ocr_adapter_verified'] = {
                     'image_generation': verified_state.get('image_generation'),
                     'result': verified_text,
@@ -503,6 +586,9 @@ def main():
             report['measurements']['png'] = screenshots['future']
             for key in ('owner_idle_rss_kib', 'owner_live_rss_kib', 'owner_after_restores_rss_kib'):
                 value = report['measurements'][key]
+                if os.name == 'nt':
+                    require(value is not None,
+                            f'Native Windows process-memory sampling failed: {key}')
                 if value is not None:
                     require(value < 100 * 1024, f'Owner exceeds 100 MiB observed: {key}={value} KiB')
             passed('controller_observed_rss_under_100_mib')

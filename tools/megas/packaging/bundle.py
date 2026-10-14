@@ -57,7 +57,7 @@ def imports_windows(binary, search):
                "psapi.dll", "rpcrt4.dll", "userenv.dll", "winhttp.dll",
                "wininet.dll", "powrprof.dll", "dwrite.dll", "dxgi.dll",
                "d3d11.dll", "opengl32.dll", "winhvplatform.dll", "cfgmgr32.dll",
-               "msimg32.dll", "uxtheme.dll", "shcore.dll"}
+               "msimg32.dll", "uxtheme.dll", "shcore.dll", "usp10.dll"}
     available = {}
     for directory in search:
         if directory.is_dir():
