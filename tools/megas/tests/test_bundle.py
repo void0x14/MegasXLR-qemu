@@ -41,8 +41,11 @@ class WindowsImportTests(unittest.TestCase):
             with mock.patch.object(bundle.subprocess, "run",
                                    return_value=SimpleNamespace(stdout=output)):
                 dependencies = bundle.imports_windows(Path("megas.exe"), [directory])
-                self.assertEqual([path.as_posix().casefold() for path in dependencies],
-                                 [private_dll.as_posix().casefold()])
+                def normalized(path):
+                    return str(path).replace("\\", "/").casefold()
+
+                self.assertEqual([normalized(path) for path in dependencies],
+                                 [normalized(private_dll)])
 
 
 if __name__ == "__main__":
