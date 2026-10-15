@@ -3062,7 +3062,8 @@ if(newline){char *answer=malloc(LINE_CAP);
 feedback(e,"Local control credential was invalid.");
 repair(e,"authentication");
 e->include_image=0;
-response(e,0,"authentication",answer,LINE_CAP,0);
+/* Authentication errors must not disclose private provider state. */
+snprintf(answer,LINE_CAP,"{\"ok\":false,\"action\":\"authentication\",\"state\":{\"phase\":\"authentication_required\"},\"feedback\":\"Local control credential was invalid.\",\"image_path\":\"\",\"latest_image\":null}");
 }
                     c->response=answer;c->response_used=strlen(answer);
                     c->response[c->response_used++]='\n';c->response_sent=0;c->accepted=mgp_now();

@@ -54,7 +54,7 @@ static int mg_main(int argc,char **argv){
     response=malloc(65536);if(!response)return 1;
     if(!strcmp(argv[i],"hook")){
         const char *event=i+1<argc?argv[i+1]:"PostToolUse";
-        mg_client(cfg.control_port,"{\"action\":\"status\"}",response,65536);
+        mg_client(cfg.control_port,"{\"action\":\"status\",\"include_image\":false}",response,65536);
         fputs("{\"hookSpecificOutput\":{\"hookEventName\":",stdout);json_string(event);fputs(",\"additionalContext\":",stdout);json_string(response);puts("}}");free(response);return 0;
     }
     if(!strcmp(argv[i],"send")){if(i+1>=argc||strlen(argv[i+1])>=sizeof(request)){usage();free(response);return 2;}strcpy(request,argv[i+1]);}

@@ -72,6 +72,13 @@ int main(void)
     assert(e->android_revision==1);
     assert(!mg_engine_submit(e,"{\"action\":\"android_observe\"}",response,sizeof(response)));
     assert(strstr(response,"private_test_marker")&&strstr(response,"\"image_path\":\"\""));
+    {MgpSocket unauthorized=mgp_connect(cfg.control_port,100);
+     const char *request="{\"action\":\"status\",\"auth\":\"wrong\"}\n";
+     int received;
+     assert(unauthorized!=MGP_BAD_SOCKET&&!mgp_send_all(unauthorized,request,strlen(request),100));
+     mg_engine_tick(e);received=mgp_recv(unauthorized,response,sizeof(response)-1);assert(received>0);response[received]=0;
+     assert(strstr(response,"authentication_required")&&!strstr(response,"private_test_marker")&&!strstr(response,"observed"));
+     mgp_close(unauthorized);}
     assert(mg_engine_submit(e,"{\"action\":\"android_act\",\"epoch\":\"boot-a\",\"expected_revision\":2,\"target\":\"n1\",\"operation\":\"click\"}",response,sizeof(response)));
     assert(mg_engine_submit(e,"{\"action\":\"android_act\",\"epoch\":\"boot-a\",\"expected_revision\":1,\"target\":\"n1\",\"operation\":\"click\",\"x\":50}",response,sizeof(response)));
     assert(mg_engine_submit(e,"{\"action\":\"click\",\"x\":50,\"y\":50}",response,sizeof(response)));
