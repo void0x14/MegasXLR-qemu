@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Contract tests for the human-relative Android task-time gate."""
 
 import copy
@@ -15,35 +15,41 @@ def valid_report(agent_seconds=410.0, oracle_result="pass"):
         "scenarios": [],
     }
     for api in range(14, 38):
-        profile_id = f"android-api{api}-x86-aosp"
-        scenario_id = f"settings-toggle-api{api}"
-        report["support_matrix"].append({
-            "profile_id": profile_id,
-            "scenario_ids": [scenario_id],
-        })
-        report["scenarios"].append({
-            "scenario_id": scenario_id,
-            "profile_id": profile_id,
-            "task_id": "wifi-toggle",
-            "android_api": api,
-            "image_variant": "aosp",
-            "abi": "x86",
-            "host": {"cpu": "test-host", "memory_mib": 2048},
-            "vm": {"machine": "pc", "memory_mib": 1024},
-            "starting_state_id": "sha256:starting-state",
-            "task_digest": "sha256:task",
-            "oracle_id": "wifi-enabled",
-            "human_elapsed_seconds": [100, 110, 120, 105, 115],
-            "human_baseline_frozen_at_utc": "2026-10-15T11:59:00Z",
-            "agent_runs": [{
-                "run_id": f"agent-api{api}",
-                "started_at_utc": "2026-10-15T12:00:00Z",
-                "finished_at_utc": "2026-10-15T12:06:50Z",
-                "elapsed_seconds": agent_seconds,
-                "oracle_result": oracle_result,
-                "failure_reason": "target did not verify" if oracle_result != "pass" else "",
-            }],
-        })
+        app_abis = ["armeabi-v7a", "x86"]
+        if api >= 21:
+            app_abis.extend(["arm64-v8a", "x86_64"])
+        for app_abi in app_abis:
+            profile_id = f"android-api{api}-{app_abi}-aosp"
+            scenario_id = f"settings-toggle-api{api}-{app_abi}"
+            report["support_matrix"].append({
+                "profile_id": profile_id,
+                "scenario_ids": [scenario_id],
+            })
+            report["scenarios"].append({
+                "scenario_id": scenario_id,
+                "profile_id": profile_id,
+                "task_id": "wifi-toggle",
+                "android_api": api,
+                "image_variant": "aosp",
+                "guest_abi": app_abi,
+                "app_abi": app_abi,
+                "translation_layer": "none",
+                "host": {"cpu": "test-host", "memory_mib": 2048},
+                "vm": {"machine": "pc", "memory_mib": 1024},
+                "starting_state_id": "sha256:starting-state",
+                "task_digest": "sha256:task",
+                "oracle_id": "wifi-enabled",
+                "human_elapsed_seconds": [100, 110, 120, 105, 115],
+                "human_baseline_frozen_at_utc": "2026-10-15T11:59:00Z",
+                "agent_runs": [{
+                    "run_id": f"agent-api{api}-{app_abi}",
+                    "started_at_utc": "2026-10-15T12:00:00Z",
+                    "finished_at_utc": "2026-10-15T12:06:50Z",
+                    "elapsed_seconds": agent_seconds,
+                    "oracle_result": oracle_result,
+                    "failure_reason": "target did not verify" if oracle_result != "pass" else "",
+                }],
+            })
     return report
 
 
@@ -75,7 +81,10 @@ class TaskBudgetTests(unittest.TestCase):
         report["scenarios"][0]["human_baseline_frozen_at_utc"] = "2026-10-15T12:01:00Z"
         errors, results = validate_report(report)
         self.assertEqual(errors, [])
-        first_api_result = next(result for result in results if result["scenario_id"] == "settings-toggle-api14")
+        first_api_result = next(
+            result for result in results
+            if result["scenario_id"] == "settings-toggle-api14-armeabi-v7a"
+        )
         self.assertFalse(first_api_result["passed"])
         self.assertIn(
             "agent run started before the human baseline was frozen",
@@ -96,14 +105,41 @@ class TaskBudgetTests(unittest.TestCase):
         report = valid_report()
         report["support_matrix"] = [
             entry for entry in report["support_matrix"]
-            if entry["profile_id"] != "android-api37-x86-aosp"
+            if not entry["profile_id"].startswith("android-api37-")
         ]
         report["scenarios"] = [
             scenario for scenario in report["scenarios"]
-            if scenario["scenario_id"] != "settings-toggle-api37"
+            if not scenario["scenario_id"].startswith("settings-toggle-api37-")
         ]
         errors, _ = validate_report(report)
         self.assertIn("support_matrix does not cover Android API 37", errors)
+
+    def test_arm_application_coverage_is_required_for_api14(self):
+        report = valid_report()
+        report["support_matrix"] = [
+            entry for entry in report["support_matrix"]
+            if entry["profile_id"] != "android-api14-armeabi-v7a-aosp"
+        ]
+        report["scenarios"] = [
+            scenario for scenario in report["scenarios"]
+            if scenario["scenario_id"] != "settings-toggle-api14-armeabi-v7a"
+        ]
+        errors, _ = validate_report(report)
+        self.assertIn(
+            "support_matrix does not cover app ABI armeabi-v7a on Android API 14",
+            errors,
+        )
+
+    def test_foreign_application_abi_requires_a_translation_layer(self):
+        report = valid_report()
+        report["scenarios"][0]["guest_abi"] = "x86"
+        report["scenarios"][0]["translation_layer"] = "none"
+        errors, results = validate_report(report)
+        self.assertTrue(any(
+            "no translation_layer is recorded" in error
+            for result in results for error in result["errors"]
+        ))
+        self.assertTrue(any(not result["passed"] for result in results))
 
 
 if __name__ == "__main__":
