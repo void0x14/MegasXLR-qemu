@@ -14,7 +14,9 @@ class MatrixContractTests(unittest.TestCase):
                 "target": "provider-issued", "operation": "click",
                 "version_path": "/payload/system/release_major",
                 "postcondition_path": "/payload/ui/dialog/open",
-                "postcondition_equals": True}
+                "postcondition_equals": True,
+                "oracle_cmd": ["/nonexistent/local-oracle"],
+                "oracle_id": "external-app-check"}
 
     def test_requires_all_real_versions(self):
         self.assertEqual(VERSIONS, set(range(4, 18)))
@@ -24,6 +26,13 @@ class MatrixContractTests(unittest.TestCase):
             with self.assertRaises(GateError):
                 validate_matrix({"devices": entries[:13]})
             entries[-1]["version"] = 16
+            with self.assertRaises(GateError):
+                validate_matrix({"devices": entries})
+
+    def test_missing_independent_oracle_never_certifies_a_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            entries = [self.entry(Path(directory), version) for version in range(4, 18)]
+            del entries[0]["oracle_cmd"]
             with self.assertRaises(GateError):
                 validate_matrix({"devices": entries})
 
