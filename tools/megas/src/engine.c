@@ -1720,7 +1720,7 @@ static int vm_start(MgEngine *e,Json *j) {
     char qmp[128],vnc[128],qga[160],memory[32],video[128],disk[4096],cdrom[4096],seed_file[4096],seed_raw[512],seed_path[1024],username[33],password[257]="",bios[1024],error[512],data_dir[1024],helpers[1024];
 
     char *argv[64];
-    char accel[64], smp[32], android_control[180], android_video[180];
+    char accel[64], smp[32], android_control[180], native_display[128];
     MgpVmLimits limits;
     MgConfig prior=e->cfg;
 int n=0;
@@ -1816,7 +1816,10 @@ argv[n++]="-vnc";
 argv[n++]=vnc;
 
     argv[n++]="-display";
-argv[n++]="none";
+if(e->cfg.android){
+    snprintf(native_display,sizeof(native_display),"megas,port=%u,fps=30,bitrate=1500",e->cfg.video_port);
+    argv[n++]=native_display;
+}else argv[n++]="none";
 argv[n++]="-device";
 argv[n++]=video;
 argv[n++]="-fw_cfg";
@@ -1837,11 +1840,8 @@ argv[n++]="virtserialport,chardev=megas-qga,name=org.qemu.guest_agent.0";
         for(a=0;a<7;a++){if(!ports[a]||ports[a]>65535){feedback(e,"Invalid Android channel port.");VM_START_FAIL();}
             for(c=0;c<a;c++)if(ports[a]==ports[c]){feedback(e,"Every VM channel needs a distinct loopback port.");VM_START_FAIL();}}
         snprintf(android_control,sizeof(android_control),"socket,id=megas-control,host=127.0.0.1,port=%u,server=on,wait=off",e->cfg.android_port);
-        snprintf(android_video,sizeof(android_video),"socket,id=megas-video,host=127.0.0.1,port=%u,server=on,wait=off",e->cfg.video_port);
         argv[n++]="-chardev";argv[n++]=android_control;
         argv[n++]="-device";argv[n++]="virtserialport,chardev=megas-control,name=org.megas.control";
-        argv[n++]="-chardev";argv[n++]=android_video;
-        argv[n++]="-device";argv[n++]="virtserialport,chardev=megas-video,name=org.megas.video";
     }
 
     if(e->cfg.disk[0]){

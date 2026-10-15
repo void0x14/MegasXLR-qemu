@@ -7,16 +7,25 @@ local build recipe are not in this repository, its tests, CI or packages.
 
 ## What runs
 
-One owner thread services QMP, the existing RFB preview, a persistent semantic
-channel and a continuous MPEG-TS relay. The relay copies already encoded video
-bytes from a guest virtio serial channel. It does not capture screenshots,
-decode/re-encode video, concatenate images, run an encoder process, write video
-segments to disk, or create worker threads. H.264/MPEG-TS is an implemented
-transport choice; HLS playlists are not implemented. Source packets must have
-188-byte MPEG-TS framing. PAT/PMT and IDRs must recur promptly so late viewers
-can start decoding; the provider must continue sending encoded updates on an
-idle display. The host has no video clock synchronization or glass-to-glass
-latency measurement yet.
+One controller owner thread services QMP, the existing RFB preview, a persistent
+semantic channel and a continuous MPEG-TS relay. Android launch selects the
+fork's native `-display megas,port=49396,fps=30,bitrate=1500` backend. It encodes
+software display updates directly to baseline H.264 and MPEG-TS. A guest video
+provider is no longer needed. This backend has one encoding worker, with x264
+also restricted to one thread, no B frames or lookahead, and at most one latest
+pending display buffer. Intermediate updates are replaced while encoding is
+busy. RGB-to-I420 conversion uses libyuv SIMD. No screendump command, image file,
+encoder subprocess or recording spool is involved.
+
+The encoder emits PAT/PMT with each access unit, a keyframe at least every second,
+and a fresh keyframe on reconnect. An unchanged screen updates at 10 fps; changing
+screens use at most the configured refresh rate. Nonblocking source writes drop
+the connection on backpressure instead of queuing delayed video. The backend
+currently supports software scanout only, not GL/dmabuf scanout. This is still
+an integration under development; the dedicated fork workflow decodes native
+output independently with FFmpeg, including actual BIOS keyboard input, and is
+distinct from Android compatibility testing. There is no glass-to-glass latency
+measurement yet. HLS playlists are not implemented.
 
 The host bounds each video client's pending output to about 24 KiB, accepts
 four viewers, and disconnects slow viewers instead of accumulating video lag.
@@ -84,12 +93,12 @@ These are QEMU host threads, not guest Android application threads.
 
 ## Public transport boundary
 
-Two QEMU `virtserialport` devices are added only in Android mode:
+One QEMU `virtserialport` device is added only in Android mode:
 
 | Guest channel | QEMU loopback backend | Host use |
 | --- | --- | --- |
 | `org.megas.control` | `android_port`, default 49395 | Persistent bounded JSONL |
-| `org.megas.video` | `video_port`, default 49396 | Already encoded MPEG-TS |
+| Native QEMU display (no guest port) | `video_port`, default 49396 | H.264/MPEG-TS source for the relay |
 | Host video endpoint | `stream_port`, default 49397 | `GET /live.ts` |
 
 The public HTTP endpoint requires `Authorization: Bearer <session credential>`

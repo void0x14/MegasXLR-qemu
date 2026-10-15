@@ -1428,6 +1428,22 @@
   'data'    : { '*grab-mod'   : 'HotKeyMod' } }
 
 ##
+# @DisplayMegas:
+#     Native H.264/MPEG-TS output for the Megas command centre.
+#
+# @port: TCP source port, bound to 127.0.0.1.  Required; 1..65535.
+#
+# @fps: Maximum refresh rate, 1..60 (default: 30).
+#
+# @bitrate: H.264 bitrate limit in kbit/s, 1..20000 (default: 1500).
+#
+# Since: 11.2
+##
+{ 'struct': 'DisplayMegas',
+  'if': 'CONFIG_MEGAS_STREAM',
+  'data': { 'port': 'uint16', '*fps': 'uint8', '*bitrate': 'uint32' } }
+
+##
 # @DisplayType:
 #     Display (user interface) type.
 #
@@ -1461,6 +1477,8 @@
 #
 # @dbus: Start a D-Bus service for the display.  (Since 7.0)
 #
+# @megas: Native H.264/MPEG-TS software display.  (Since 11.2)
+#
 # Since: 2.12
 ##
 { 'enum'    : 'DisplayType',
@@ -1473,7 +1491,8 @@
     { 'name': 'curses', 'if': 'CONFIG_CURSES' },
     { 'name': 'cocoa', 'if': 'CONFIG_COCOA' },
     { 'name': 'spice-app', 'if': 'CONFIG_SPICE' },
-    { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' }
+    { 'name': 'dbus', 'if': 'CONFIG_DBUS_DISPLAY' },
+    { 'name': 'megas', 'if': 'CONFIG_MEGAS_STREAM' }
   ]
 }
 
@@ -1510,7 +1529,8 @@
       'egl-headless': { 'type': 'DisplayEGLHeadless',
                         'if': 'CONFIG_OPENGL' },
       'dbus': { 'type': 'DisplayDBus', 'if': 'CONFIG_DBUS_DISPLAY' },
-      'sdl': { 'type': 'DisplaySDL', 'if': 'CONFIG_SDL' }
+      'sdl': { 'type': 'DisplaySDL', 'if': 'CONFIG_SDL' },
+      'megas': { 'type': 'DisplayMegas', 'if': 'CONFIG_MEGAS_STREAM' }
   }
 }
 

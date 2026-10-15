@@ -94,6 +94,13 @@ system_ss.add(when: vnc, if_true: files('vnc-system.c'), if_false: files('vnc-st
 
 ui_modules = {}
 
+if have_megas_stream
+  megas_ss = ss.source_set()
+  megas_ss.add(pixman, megas_x264, megas_yuv,
+               files('megas.c', 'megas-video.c'))
+  ui_modules += {'megas': megas_ss}
+endif
+
 if curses.found()
   curses_ss = ss.source_set()
   curses_ss.add(when: [curses, iconv], if_true: [files('curses.c'), pixman])

@@ -1,0 +1,49 @@
+name: Megas fork QEMU native video
+on:
+  push:
+    branches: ['work/android-runtime-native-stream']
+    paths: ['ui/megas*', 'ui/meson.build', 'qapi/ui.json', 'meson*', 'tools/megas/**', '.github/workflows/megas-qemu.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: megas-fork-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-video:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install source build and independent decoder dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential ninja-build pkg-config python3-venv libglib2.0-dev libpixman-1-dev zlib1g-dev libx264-dev libyuv-dev libfdt-dev ffmpeg libx11-dev
+      - name: Configure this fork, without distribution QEMU
+        run: |
+          mkdir build-native
+          cd build-native
+          ../configure --target-list=x86_64-softmmu --disable-docs --disable-werror --disable-rust --enable-pixman -Dmegas_stream=enabled
+      - name: Build the actual fork and encoder fixture
+        run: |
+          ninja -C build-native -j2 qemu-system-x86_64 qemu-img
+          cc -std=c11 -Wall -Wextra -Werror -O2 -DMEGAS_VIDEO_STANDALONE -Iui tools/megas/tests/video_fixture.c ui/megas-video.c -lx264 -lyuv -o build-native/video-fixture
+      - name: Decode real native output and validate guest input and reconnect
+        run: |
+          python3 tools/megas/tests/test_native_video.py --encoder build-native/video-fixture --qemu build-native/qemu-system-x86_64 --output build-native/video-proof
+      - name: Run controller checks against the fork runtime
+        run: |
+          make -C tools/megas headless
+          MEGAS_QEMU="$PWD/build-native/qemu-system-x86_64" MEGAS_QEMU_IMG="$PWD/build-native/qemu-img" make -C tools/megas test-engine test-android test-stream test-task-budget
+      - name: Preserve actual fork binaries and video evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-fork-native-video
+          path: |
+            build-native/video-proof/
+            build-native/qemu-system-x86_64
+            build-native/qemu-img
+            build-native/video-fixture
+            build-native/meson-logs/meson-log.txt
+          if-no-files-found: warn

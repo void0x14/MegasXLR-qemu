@@ -1162,6 +1162,14 @@ endif
 
 zlib = dependency('zlib', required: true)
 
+megas_stream_opt = get_option('megas_stream').require(
+  pixman.found(), error_message: 'Megas display requires pixman')
+megas_x264 = dependency('x264', required: megas_stream_opt,
+                        method: 'pkg-config')
+megas_yuv = cc.find_library('yuv', has_headers: ['libyuv/convert_from_argb.h'],
+                            required: megas_stream_opt)
+have_megas_stream = pixman.found() and megas_x264.found() and megas_yuv.found()
+
 libaio = not_found
 if not get_option('linux_aio').auto() or have_block
   libaio = cc.find_library('aio', has_headers: ['libaio.h'],
@@ -2458,6 +2466,7 @@ if blkio.found()
 endif
 config_host_data.set('CONFIG_CURL', curl.found())
 config_host_data.set('CONFIG_CURSES', curses.found())
+config_host_data.set('CONFIG_MEGAS_STREAM', have_megas_stream)
 config_host_data.set('CONFIG_GBM', gbm.found())
 config_host_data.set('CONFIG_GIO', gio.found())
 config_host_data.set('CONFIG_GTK', gtk.found())
@@ -4932,6 +4941,7 @@ summary_info += {'D-Bus display':     dbus_display}
 summary_info += {'SDL support':       sdl}
 summary_info += {'SDL image support': sdl_image}
 summary_info += {'GTK support':       gtk}
+summary_info += {'Megas H.264/MPEG-TS display': have_megas_stream}
 summary_info += {'pixman':            pixman}
 summary_info += {'VTE support':       vte}
 summary_info += {'PNG support':       png}
