@@ -18,12 +18,12 @@ jobs:
       - name: Install source build and independent decoder dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential ninja-build pkg-config python3-venv libglib2.0-dev libpixman-1-dev zlib1g-dev libx264-dev libyuv-dev libfdt-dev ffmpeg libx11-dev
+          sudo apt-get install -y build-essential ninja-build pkg-config python3-venv libglib2.0-dev libpixman-1-dev zlib1g-dev libx264-dev libyuv-dev libfdt-dev libslirp-dev ffmpeg libx11-dev
       - name: Configure this fork, without distribution QEMU
         run: |
           mkdir build-native
           cd build-native
-          ../configure --target-list=x86_64-softmmu --disable-docs --disable-debug-info --enable-werror --disable-rust --enable-pixman --enable-megas-stream
+          ../configure --target-list=x86_64-softmmu --disable-docs --disable-debug-info --enable-werror --disable-rust --enable-pixman --enable-megas-stream --enable-slirp
       - name: Build the actual fork and encoder fixture
         run: |
           cc -std=c11 -Wall -Wextra -Werror -O2 -DMEGAS_VIDEO_STANDALONE -Iui tools/megas/tests/video_fixture.c ui/megas-video.c -lx264 -lyuv -o build-native/video-fixture

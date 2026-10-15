@@ -146,6 +146,19 @@ slow-viewer counts are observable. They do not perform online model training.
 
 ## Validation and remaining work
 
+`megas-qemu.yml` builds this fork from source, with compiler warnings treated as
+errors, and decodes the native display with independent FFmpeg. It checks RGB
+channel order, timestamp wrap, actual BIOS keyboard input, reconnect, host thread
+count, and capture-to-loopback latency. This last metric excludes rendering in
+a viewer and agent reasoning. `megas-android.yml` separately attempts an official
+checksum-verified Android-x86 9.0-r2 live ISO with a test-only serial boot-property
+observer in its initramfs. A BIOS test pass is not an Android boot pass.
+
+The command centre repaints immediately for input and changed VM pixels/state;
+otherwise its UI refreshes four times a second. Its control loop still services
+IPC every iteration. Linux CI observes real XDamage events and control responses
+to check idle repaint rate without taking screenshots.
+
 `make test-stream` checks authenticated HTTP, source availability, fragmented
 byte-exact transfer, malformed-stream shutdown, and (when FFmpeg is installed
 for tests) end-to-end decoding of ten actual H.264 frames. `make test-android`
@@ -162,7 +175,7 @@ independent success oracle; no Android scenario has been certified by these
 synthetic fixtures.
 
 Remaining implementation/qualification includes the local private provider and
-its research/fork/build, a guest encoder, per-version Android 4–17 image/device
+its research/fork/build, per-version Android 4–17 image/device
 profiles, verified ARM ABI translation or matching ARM hardware, Play/GApps
 image management, modified-image coverage, Windows hard thread isolation, and
 real application and human-time comparisons. No measured reduction of the

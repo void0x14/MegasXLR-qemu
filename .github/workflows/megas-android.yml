@@ -15,7 +15,7 @@ jobs:
       - name: Install experiment tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y xorriso cpio ffmpeg libx264-164 libyuv0 libfdt1 qemu-system-data seabios
+          sudo apt-get install -y xorriso cpio ffmpeg libx264-164 libyuv0 libfdt1 libslirp0 qemu-system-data seabios
           if [ -e /dev/kvm ]; then sudo chmod a+rw /dev/kvm; fi
       - name: Download and verify the official Android-x86 9.0-r2 ISO
         run: |

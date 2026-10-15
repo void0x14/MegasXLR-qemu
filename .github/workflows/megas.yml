@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install build-runner dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential libx11-dev qemu-system-x86 qemu-utils tesseract-ocr xvfb ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y build-essential libx11-dev libxdamage1 xdotool qemu-system-x86 qemu-utils tesseract-ocr xvfb ffmpeg
       - name: Record imported distribution QEMU runtime
         run: |
           qemu-system-x86_64 --version
@@ -25,6 +25,8 @@ jobs:
           dpkg-query -W qemu-system-x86 qemu-utils
       - name: Build native and headless controllers
         run: make -C tools/megas all headless
+      - name: Verify idle GUI paint and responsive control without screenshots
+        run: xvfb-run -a python3 tools/megas/tests/test_gui_idle.py tools/megas/build/megas
       - name: Run native protocol and real QEMU checks
         id: native-tests
         run: make -C tools/megas test

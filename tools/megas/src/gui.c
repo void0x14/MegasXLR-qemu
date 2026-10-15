@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "megas.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1317,13 +1318,16 @@ static int gui_native_open(MgGui *ui)
     ShowWindow(ui->window,SW_SHOW);return ui->ctx!=NULL;
 }
 
-static void gui_native_events(MgGui *ui)
+static int gui_native_events(MgGui *ui)
 {
     MSG message;
+    int changed=0;
     while(PeekMessageW(&message,NULL,0,0,PM_REMOVE)) {
+        changed=1;
         if(message.message==WM_QUIT) {ui->alive=0;break;}
         TranslateMessage(&message);DispatchMessageW(&message);
     }
+    return changed;
 }
 
 static void gui_native_close(MgGui *ui)
@@ -1390,9 +1394,11 @@ static int gui_native_open(MgGui *ui)
     return ui->ctx != NULL;
 }
 
-static void gui_native_events(MgGui *ui)
+static int gui_native_events(MgGui *ui)
 {
+    int changed=0;
     while(XPending(ui->display)) {
+        changed=1;
         XEvent event;XNextEvent(ui->display,&event);
         if(event.type==ClientMessage && (Atom)event.xclient.data.l[0]==ui->close_atom) {ui->alive=0;continue;}
         if(event.type==FocusOut)gui_release(ui);
@@ -1459,6 +1465,7 @@ static void gui_native_events(MgGui *ui)
         }
         nk_xlib_handle_event(ui->display,ui->screen,ui->window,&event);
     }
+    return changed;
 }
 
 static void gui_native_close(MgGui *ui)
@@ -1475,6 +1482,8 @@ static void gui_native_close(MgGui *ui)
 int mg_gui_run(MgEngine *engine)
 {
     MgGui *ui=calloc(1,sizeof(*ui));const MgConfig *config;
+    MgStatus painted_status={0};
+    uint64_t last_paint=0;
     if(!ui)return 1;
     ui->engine=engine;ui->width=1180;ui->height=760;ui->alive=1;
     config=mg_engine_config(engine);
@@ -1500,13 +1509,27 @@ int mg_gui_run(MgEngine *engine)
     }
     gui_palette(ui->ctx);
     while(ui->alive && !mg_interrupted()) {
+        const MgStatus *status;
+        uint64_t now;
+        int changed;
         mg_engine_tick(engine);
         if (strcmp(ui->seen_feedback,mg_engine_status(engine)->feedback) != 0) {
             snprintf(ui->seen_feedback,sizeof(ui->seen_feedback),"%s",mg_engine_status(engine)->feedback);
             if (!ui->pending[0]) gui_note(ui,ui->seen_feedback);
         }
-        nk_input_begin(ui->ctx);gui_native_events(ui);nk_input_end(ui->ctx);
-        gui_draw(ui);gui_render(ui);
+        nk_input_begin(ui->ctx);changed=gui_native_events(ui);nk_input_end(ui->ctx);
+        status=mg_engine_status(engine);now=mgp_now();
+        if(changed || ui->pending[0] || !last_paint || now-last_paint>=250 ||
+           status->frame_generation!=painted_status.frame_generation ||
+           status->connected!=painted_status.connected ||
+           status->running!=painted_status.running ||
+           strcmp(status->phase,painted_status.phase) ||
+           strcmp(status->feedback,painted_status.feedback) ||
+           nk_input_is_mouse_down(&ui->ctx->input,NK_BUTTON_LEFT) ||
+           nk_input_is_mouse_down(&ui->ctx->input,NK_BUTTON_RIGHT)) {
+            gui_draw(ui);gui_render(ui);
+            painted_status=*mg_engine_status(engine);last_paint=now;
+        }
         /* The working feedback has been painted before bounded operations run. */
         gui_execute_pending(ui);
 #ifdef _WIN32
