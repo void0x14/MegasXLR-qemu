@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* DMA-BUF -> direct VAAPI import -> GPU VPP -> H.264 hardware encoder.
  * There is deliberately no software encoder, upload or download path. */
+#if defined(MEGAS_VIDEO_STANDALONE) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #ifndef MEGAS_VIDEO_STANDALONE
 #include "qemu/osdep.h"
 #endif
