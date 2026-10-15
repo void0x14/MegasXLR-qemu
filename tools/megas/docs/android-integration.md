@@ -139,7 +139,12 @@ byte-exact transfer, malformed-stream shutdown, and (when FFmpeg is installed
 for tests) end-to-end decoding of ten actual H.264 frames. `make test-android`
 uses a synthetic provider over real sockets to verify revision guards,
 coordinate rejection, result/queue distinction, uncertainty and privacy.
-These are host tests, not Android boot or application tests. The existing
+`make test-isolation` additionally exercises real kernel thread, memory and CPU
+caps when `MEGAS_TEST_CGROUP_PARENT` is explicitly supplied. Without a delegated
+parent it reports a skip, not enforcement success. Linux CI supplies a separate
+temporary cgroup and checks thread-creation refusal, a contained OOM kill, CPU
+throttling counters, and group cleanup. These are host tests, not Android boot
+or application tests. The existing
 `test-task-budget` gate still requires real human/agent task reports and an
 independent success oracle; no Android scenario has been certified by these
 synthetic fixtures.

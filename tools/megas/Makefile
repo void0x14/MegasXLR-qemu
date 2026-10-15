@@ -28,7 +28,7 @@ CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 endif
 
 .PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle test-task-budget bundle
-.PHONY: test-stream test-android
+.PHONY: test-stream test-android test-isolation
 all: $(BUILD)/megas$(EXE)
 headless: $(BUILD)/megas-headless$(EXE)
 $(BUILD):
@@ -54,6 +54,10 @@ $(BUILD)/live-fixture$(EXE): tests/live_fixture.c src/live.c src/platform.c src/
 test-stream: $(BUILD)/live-fixture$(EXE)
 	$(PYTHON) tests/test_stream.py "$(BUILD)/live-fixture$(EXE)"
 ifeq ($(WINDOWS),0)
+$(BUILD)/test-isolation: tests/test_isolation.c src/platform.c src/platform.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -pthread -o "$@" tests/test_isolation.c src/platform.c $(LDLIBS)
+test-isolation: $(BUILD)/test-isolation
+	"./$(BUILD)/test-isolation"
 $(BUILD)/test-android: tests/test_android.c $(filter-out src/main.c,$(COMMON)) $(HEADERS) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_android.c $(filter-out src/main.c src/engine.c,$(COMMON)) -lm $(LDLIBS)
 test-android: $(BUILD)/test-android
@@ -66,9 +70,9 @@ $(BUILD)/test-guest: tests/test_guest.c src/guest.c src/platform.c $(wildcard sr
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -pthread -o "$@" tests/test_guest.c src/guest.c src/platform.c $(LDLIBS)
 test-guest: $(BUILD)/test-guest
 	"./$(BUILD)/test-guest"
-test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-live test-agent test-task-budget test-stream test-android
+test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-live test-agent test-task-budget test-stream test-android test-isolation
 else
-test-engine test-guest test-android:
+test-engine test-guest test-android test-isolation:
 	@echo "SKIP: $@ uses POSIX-only test fixtures and is not run on Windows."
 test: test-rfb test-platform test-seed test-bundle test-live test-agent test-task-budget test-stream
 endif

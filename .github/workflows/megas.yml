@@ -28,6 +28,15 @@ jobs:
       - name: Run native protocol and real QEMU checks
         id: native-tests
         run: make -C tools/megas test
+      - name: Verify kernel-enforced CPU memory and thread budgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          scope="/sys/fs/cgroup/megas-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo mkdir "$scope"
+          trap 'sudo rmdir "$scope"' EXIT
+          printf '+cpu +memory +pids\n' | sudo tee "$scope/cgroup.subtree_control" >/dev/null
+          sudo env MEGAS_TEST_CGROUP_PARENT="$scope" tools/megas/build/test-isolation
       - name: Preserve Linux QEMU test diagnostics
         if: failure() && steps.native-tests.outcome == 'failure'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
