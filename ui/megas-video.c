@@ -13,6 +13,7 @@ struct MegasVideo {
     x264_t *encoder;
     x264_picture_t picture;
     unsigned width, height;
+    int64_t frames;
     uint8_t pat_cc, pmt_cc, video_cc;
 };
 
@@ -147,9 +148,11 @@ MegasVideo *megas_video_new(unsigned width, unsigned height, unsigned fps,
     p.b_sliced_threads = 0;
     p.i_fps_num = fps;
     p.i_fps_den = 1;
-    p.b_vfr_input = 1;
+    /* x264 VFR adds a frame of lookahead even with the zerolatency tune.
+     * Encode immediately with nominal CFR; actual capture PTS belong to TS. */
+    p.b_vfr_input = 0;
     p.i_timebase_num = 1;
-    p.i_timebase_den = 90000;
+    p.i_timebase_den = fps;
     p.i_keyint_max = fps; /* reconnect waits at most one second */
     p.i_keyint_min = 1;
     p.b_repeat_headers = 1;
@@ -166,7 +169,10 @@ MegasVideo *megas_video_new(unsigned width, unsigned height, unsigned fps,
         return NULL;
     }
     v->encoder = x264_encoder_open(&p);
-    if (!v->encoder) {
+    if (!v->encoder || x264_encoder_maximum_delayed_frames(v->encoder)) {
+        if (v->encoder) {
+            x264_encoder_close(v->encoder);
+        }
         x264_picture_clean(&v->picture);
         free(v);
         return NULL;
@@ -191,14 +197,14 @@ bool megas_video_encode(MegasVideo *v, const uint8_t *bgra, int stride,
                    v->picture.img.i_stride[2], v->width, v->height)) {
         return false;
     }
-    v->picture.i_pts = timestamp;
+    v->picture.i_pts = v->frames++;
     v->picture.i_type = force_keyframe ? X264_TYPE_IDR : X264_TYPE_AUTO;
     size = x264_encoder_encode(v->encoder, &nals, &count, &v->picture, &output);
     if (size <= 0 || count <= 0) {
         return false;
     }
     /* x264 guarantees all NAL payloads in one contiguous allocation. */
-    return access_unit(v, nals[0].p_payload, size, output.i_pts,
+    return access_unit(v, nals[0].p_payload, size, timestamp,
                        output.b_keyframe, write, opaque);
 }
 

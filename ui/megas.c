@@ -263,9 +263,10 @@ static void megas_init(DisplayState *ds, DisplayOptions *opts)
     DisplayMegas *options = &opts->u.megas;
     MegasDisplay *s;
     char port[8];
+    char host[] = "127.0.0.1";
     SocketAddress address = {
         .type = SOCKET_ADDRESS_TYPE_INET,
-        .u.inet.host = "127.0.0.1",
+        .u.inet.host = host,
         .u.inet.port = port,
     };
 
@@ -291,7 +292,7 @@ static void megas_init(DisplayState *ds, DisplayOptions *opts)
     display = s;
     qemu_console_register_listener(qemu_console_lookup_default(), &s->dcl,
                                    &megas_ops);
-    qemu_console_listener_set_refresh(&s->dcl, MAX(1, 1000 / s->fps));
+    qemu_console_listener_set_refresh(&s->dcl, DIV_ROUND_UP(1000, s->fps));
 }
 
 static QemuDisplay megas_display = {

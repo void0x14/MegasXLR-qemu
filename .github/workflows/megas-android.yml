@@ -2,7 +2,7 @@ name: Megas actual Android boot experiment
 on:
   push:
     branches: ['work/android-runtime-native-stream']
-    paths: ['tests/megas/android_boot.py', '.github/workflows/megas-android.yml']
+    paths: ['tests/megas/android_boot.py', '.github/workflows/megas-android.yml', 'ui/megas*']
 permissions:
   contents: read
   actions: read
