@@ -12,7 +12,7 @@ int mg_interrupted(void){return closing != 0;}
 static void stop_signal(int signal_number){(void)signal_number;closing=1;}
 static void json_string(const char *s){const unsigned char *p=(const unsigned char*)s;putchar('"');while(*p){switch(*p){case '"':fputs("\\\"",stdout);break;case '\\':fputs("\\\\",stdout);break;case '\n':fputs("\\n",stdout);break;case '\r':fputs("\\r",stdout);break;case '\t':fputs("\\t",stdout);break;default:if(*p<32)printf("\\u%04x",*p);else putchar(*p);}p++;}putchar('"');}
 static int value(const char *s,unsigned *out){char *end;unsigned long n;errno=0;n=strtoul(s,&end,10);if(errno||*end||n<1||n>65535)return -1;*out=(unsigned)n;return 0;}
-static void usage(void){puts("Megas — native VM owner and agent control\n\nmegas [--runtime DIR] [--port PORT] [--qmp-port PORT] [--vnc-port PORT] gui|serve\nmegas [options] status|steps|repair|pause|resume|stop\nmegas [options] send '{\"action\":\"start\",\"disk\":\"work.qcow2\"}'\nmegas [options] agent [--text-only]\nmegas [options] hook SessionStart|PreToolUse|PostToolUse|UserPromptSubmit\n\nCommands always return current VM state and latest live image/fallback.\nThe controller owns QEMU; its process and commands are audited in actions.jsonl.");}
+static void usage(void){puts("Megas — native VM owner and agent control\n\nmegas [--runtime DIR] [--port PORT] [--qmp-port PORT] [--vnc-port PORT] gui|serve\nmegas [options] status|steps|repair|pause|resume|stop\nmegas [options] send '{\"action\":\"start\",\"disk\":\"work.qcow2\"}'\nmegas [options] agent [--vision|--text-only]\nmegas [options] hook SessionStart|PreToolUse|PostToolUse|UserPromptSubmit\n\nCommands return current state. Agent mode defaults to semantic state and livestream metadata; screenshots and OCR are optional.\nThe controller owns QEMU; its process and commands are audited in actions.jsonl.");}
 static int mg_main(int argc,char **argv){
     MgConfig cfg;MgEngine *engine;char *response;char request[8192];int i=1,result=0;
     mg_config_defaults(&cfg);
@@ -42,7 +42,15 @@ static int mg_main(int argc,char **argv){
         {printf("Megas owner ready on localhost:%u. Every process and command is visible in %s\n",cfg.control_port,mg_engine_status(engine)->journal_path);fflush(stdout);while(!closing){mg_engine_tick(engine);mgp_sleep(5);}}
         mg_engine_free(engine);return result;
     }
-    if(!strcmp(argv[i],"agent"))return mg_agent_stdio(cfg.control_port,!(i+1<argc&&!strcmp(argv[i+1],"--text-only")));
+    if(!strcmp(argv[i],"agent")){
+        int mode=0;
+        if(i+1<argc){
+            if(!strcmp(argv[i+1],"--vision"))mode=1;
+            else if(!strcmp(argv[i+1],"--text-only"))mode=2;
+            else {usage();return 2;}
+        }
+        return mg_agent_stdio(cfg.control_port,mode);
+    }
     response=malloc(65536);if(!response)return 1;
     if(!strcmp(argv[i],"hook")){
         const char *event=i+1<argc?argv[i+1]:"PostToolUse";

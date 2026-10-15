@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Install build-runner dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential libx11-dev qemu-system-x86 qemu-utils tesseract-ocr xvfb
+        run: sudo apt-get update && sudo apt-get install -y build-essential libx11-dev qemu-system-x86 qemu-utils tesseract-ocr xvfb ffmpeg
       - name: Record imported distribution QEMU runtime
         run: |
           qemu-system-x86_64 --version

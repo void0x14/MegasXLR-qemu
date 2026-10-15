@@ -46,6 +46,7 @@ typedef struct {
     int width, height, alive, focused, tab, settings_tab, advanced_settings, res_selected;
     int ram, vm_w, vm_h, passwordless, disk_gb, create_dialog, creating_disk;
     int password_field_visible;
+    int android, cpus, cpu_percent;
     float row;
     char qemu[1024], disk[1024], iso[1024], checkpoint[64];
     char username[128], password[256];
@@ -182,7 +183,7 @@ static void gui_start(MgGui *ui)
 {
     char qemu[6144], disk[6144], iso[6144], username[768], password[1536], request[22000];
     const MgStatus *status = mg_engine_status(ui->engine);
-    if (!ui->passwordless && !ui->password[0] && !status->owned_pid) {
+    if (!ui->android && !ui->passwordless && !ui->password[0] && !status->owned_pid) {
         gui_note(ui, tr("Yeni VM için şifresiz oturumu seçin veya yeni bir misafir şifresi girin.",
                         "For a new VM, choose passwordless login or enter a new guest password."));
         return;
@@ -200,6 +201,12 @@ static void gui_start(MgGui *ui)
         gui_wipe(request, sizeof(request));
         return;
     }
+    if(ui->android){
+        snprintf(request,sizeof(request),
+                 "{\"action\":\"start\",\"android\":true,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"cpus\":%d,\"cpu_percent\":%d}",
+                 qemu,disk,iso,ui->ram,ui->vm_w,ui->vm_h,ui->cpus,ui->cpu_percent);
+        gui_queue(ui,request);gui_wipe(request,sizeof(request));return;
+    }
     if (!ui->passwordless && ui->password[0] &&
         !json_string(password, sizeof(password), ui->password)) {
         gui_note(ui, tr("Şifre çok uzun.", "Password is too long."));
@@ -213,12 +220,12 @@ static void gui_start(MgGui *ui)
     }
     if (!ui->passwordless && ui->password[0]) {
         snprintf(request, sizeof(request),
-            "{\"action\":\"start\",\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"username\":%s,"
+            "{\"action\":\"start\",\"android\":false,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"username\":%s,"
             "\"password\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"passwordless\":false}",
             qemu, disk, iso, username, password, ui->ram, ui->vm_w, ui->vm_h);
     } else {
         snprintf(request, sizeof(request),
-            "{\"action\":\"start\",\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"username\":%s,"
+            "{\"action\":\"start\",\"android\":false,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"username\":%s,"
             "\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"passwordless\":%s}",
             qemu, disk, iso, username, ui->ram, ui->vm_w, ui->vm_h,
             ui->passwordless ? "true" : "false");
@@ -741,6 +748,16 @@ static void gui_settings(MgGui *ui)
     nk_property_int(ctx, tr("VM belleği (MB)", "VM memory (MB)"), 64, &ui->ram, 32768, 64, 16);
     if (nk_widget_is_hovered(ctx)) nk_tooltip(ctx, tr("Bu bellek VM'e aittir. Kontrol panelinin belleğinden ayrıdır.", "This memory belongs to the VM, separately from the controller."));
     nk_layout_row_dynamic(ctx, ui->row, 1);
+    nk_checkbox_label(ctx,tr("Android: yerel sağlayıcı ve canlı yayın", "Android: local provider and livestream"),&ui->android);
+    if(ui->android){
+        nk_layout_row_dynamic(ctx,ui->row,2);
+        nk_property_int(ctx,"vCPU",1,&ui->cpus,4,1,1);
+        nk_property_int(ctx,tr("CPU bütçesi %", "CPU budget %"),1,&ui->cpu_percent,400,10,1);
+        nk_layout_row_dynamic(ctx,ui->row*3,1);
+        nk_label_wrap(ctx,tr("Yerel Android sağlayıcısı, donanım hızlandırması ve ayrılmış kaynak sınırları gerekir. Bu seçenek Android imajı veya Google uygulaması indirmez.",
+                             "Requires a local Android provider, hardware acceleration and delegated resource limits. This option does not download Android images or Google apps."));
+    }
+    nk_layout_row_dynamic(ctx, ui->row, 1);
     nk_label(ctx, tr("Ekran Çözünürlüğü Seçici", "Resolution Selector"), NK_TEXT_LEFT);
     {
         int prev = ui->res_selected;
@@ -1011,7 +1028,9 @@ static void gui_draw(MgGui *ui)
         if (nk_button_label(ctx, "Stop")) gui_action(ui, "stop");
         if (nk_button_label(ctx, "Save screenshot")) gui_action(ui, "screenshot");
         nk_layout_row_dynamic(ctx, ui->row*1.5f, 1);
-        snprintf(line,sizeof(line),"%s · %ux%u · %s",s->phase,s->width,s->height,ui->feedback[0] ? ui->feedback : s->feedback);
+        snprintf(line,sizeof(line),"%s · %ux%u · %u threads · %.1f MiB · Android %s / video %s · %s",s->phase,s->width,s->height,
+                 s->qemu_threads,(double)s->qemu_memory_bytes/(1024*1024),s->android_ready?"ready":"-",s->video_ready?"live":"-",
+                 ui->feedback[0] ? ui->feedback : s->feedback);
         nk_label_wrap(ctx,line);
         if (ui->width >= 960) {
             nk_layout_row_begin(ctx,NK_STATIC,body,2);
@@ -1465,6 +1484,7 @@ int mg_gui_run(MgEngine *engine)
     snprintf(ui->username,sizeof(ui->username),"megas");
     snprintf(ui->checkpoint,sizeof(ui->checkpoint),"step-1");
     ui->ram=(int)config->ram_mb;ui->vm_w=(int)config->width;ui->vm_h=(int)config->height;
+    ui->android=config->android;ui->cpus=(int)config->cpus;ui->cpu_percent=(int)config->cpu_percent;
     ui->passwordless=config->passwordless;ui->disk_gb=16;
     for (int i = 1; i < RES_PRESETS_COUNT; ++i) {
         if (res_presets[i].w == ui->vm_w && res_presets[i].h == ui->vm_h) {

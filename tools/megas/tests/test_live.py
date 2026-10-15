@@ -406,7 +406,7 @@ def main():
             report['measurements']['ocr_adapter_runs'] = adapter_run_observations
             for text_only in (False, True):
                 adapter_run_started = time.monotonic()
-                result = subprocess.run(common + ['agent'] + (['--text-only'] if text_only else []),
+                result = subprocess.run(common + ['agent'] + (['--text-only'] if text_only else ['--vision']),
                                         input=packet, capture_output=True, text=True, timeout=10)
                 adapter_run_observations.append({
                     'text_only': text_only,

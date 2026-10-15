@@ -12,6 +12,7 @@
 #include <direct.h>
 #include <io.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 #else
 #include <unistd.h>
 #include <fcntl.h>
@@ -27,6 +28,7 @@
 #ifdef __linux__
 #include <sys/prctl.h>
 #include <dirent.h>
+#include <sys/vfs.h>
 #endif
 #endif
 #ifdef _WIN32
@@ -447,8 +449,9 @@ static int quote_arg(char *out, size_t cap, size_t *used, const char *arg)
     return 0;
 }
 #endif
-int mgp_spawn_bounded(MgpProcess *process, char *const argv[], const char *logpath,
+static int spawn_process(MgpProcess *process, char *const argv[], const char *logpath,
                       uint64_t memory_bytes, unsigned cpu_seconds,
+                      const MgpVmLimits *vm,
                       char *error, size_t capacity)
 {
     process->exit_code = -1;
@@ -504,6 +507,20 @@ int mgp_spawn_bounded(MgpProcess *process, char *const argv[], const char *logpa
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseHandle(log);
         if (process->job) { CloseHandle(process->job); process->job = NULL; }
         goto fail;
+    }
+    if (vm && vm->cpu_percent) {
+        JOBOBJECT_CPU_RATE_CONTROL_INFORMATION cpu;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+        cpu.CpuRate = vm->cpu_percent * 100 / GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+        if (!cpu.CpuRate) cpu.CpuRate = 1;
+        if (!SetInformationJobObject(process->job, JobObjectCpuRateControlInformation, &cpu, sizeof(cpu))) {
+            TerminateJobObject(process->job, 1);
+            WaitForSingleObject(pi.hProcess, 1000);
+            CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseHandle(log);
+            CloseHandle(process->job); process->job = NULL;
+            goto fail;
+        }
     }
     if (ResumeThread(pi.hThread) == (DWORD)-1) {
         TerminateJobObject(process->job, 1);
@@ -566,6 +583,21 @@ fail:
         if (setsid() < 0) {
             spawn_child_fail(pipefd[1], errno);
         }
+        if (vm) {
+            /* Bound software rendering libraries without touching the owner. */
+            if (setenv("OMP_THREAD_LIMIT", "1", 1) || setenv("LP_NUM_THREADS", "2", 1) ||
+                setenv("GALLIUM_NUM_THREADS", "2", 1)) spawn_child_fail(pipefd[1], errno);
+#ifdef __linux__
+            if (process->cgroup[0]) {
+                char path[1100];
+                int fd;
+                snprintf(path, sizeof(path), "%s/cgroup.procs", process->cgroup);
+                fd = open(path, O_WRONLY | O_CLOEXEC);
+                if (fd < 0 || write(fd, "0\n", 2) != 2) spawn_child_fail(pipefd[1], errno);
+                close(fd);
+            }
+#endif
+        }
         execvp(argv[0], argv); spawn_child_fail(pipefd[1], errno);
     }
     close(log); close(pipefd[1]);
@@ -580,6 +612,86 @@ fail:
     snprintf(error, capacity, "Program could not start: %s. Repair prompt contains the log path.", strerror(errno));
     return -1;
 #endif
+}
+int mgp_spawn_bounded(MgpProcess *process, char *const argv[], const char *logpath,
+                      uint64_t memory_bytes, unsigned cpu_seconds,
+                      char *error, size_t capacity)
+{
+    return spawn_process(process, argv, logpath, memory_bytes, cpu_seconds, NULL, error, capacity);
+}
+#ifdef __linux__
+static int cgroup_write(const char *directory, const char *name, const char *value)
+{
+    char path[1200];
+    int fd, result;
+    size_t length = strlen(value);
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    fd = open(path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    result = write(fd, value, length) == (ssize_t)length ? 0 : -1;
+    close(fd);
+    return result;
+}
+#endif
+int mgp_spawn_vm(MgpProcess *process, char *const argv[], const char *logpath,
+                 const MgpVmLimits *limits, char *error, size_t capacity)
+{
+    int result;
+    if (!limits || !limits->cpu_percent || limits->cpu_percent > 400 ||
+        limits->tasks < 8 || limits->tasks > 128 || !limits->memory_bytes) {
+        snprintf(error, capacity, "Invalid VM resource budget."); return -1;
+    }
+    process->cgroup[0] = 0;
+#ifdef __linux__
+    if (limits->cgroup_parent && limits->cgroup_parent[0]) {
+        struct statfs fs;
+        char value[128];
+        unsigned char nonce[8];
+        unsigned long long id = 0;
+        if (statfs(limits->cgroup_parent, &fs) || (unsigned long)fs.f_type != 0x63677270UL ||
+            mgp_random(nonce, sizeof(nonce))) goto unavailable;
+        memcpy(&id, nonce, sizeof(id));
+        if (snprintf(process->cgroup, sizeof(process->cgroup), "%s/megas-%llu",
+                     limits->cgroup_parent, id) >= (int)sizeof(process->cgroup)) {
+            process->cgroup[0] = 0; goto unavailable;
+        }
+        if (mkdir(process->cgroup, 0700)) { process->cgroup[0] = 0; goto unavailable; }
+        snprintf(value, sizeof(value), "%u 100000\n", limits->cpu_percent * 1000);
+        if (cgroup_write(process->cgroup, "cpu.max", value)) goto unavailable;
+        snprintf(value, sizeof(value), "%llu\n", (unsigned long long)limits->memory_bytes);
+        if (cgroup_write(process->cgroup, "memory.max", value) ||
+            cgroup_write(process->cgroup, "memory.swap.max", "0\n") ||
+            cgroup_write(process->cgroup, "memory.oom.group", "1\n")) goto unavailable;
+        snprintf(value, sizeof(value), "%u\n", limits->tasks);
+        if (cgroup_write(process->cgroup, "pids.max", value)) goto unavailable;
+    } else if (limits->required) goto unavailable;
+#elif defined(_WIN32)
+    /* Job Objects enforce CPU and memory, but have no hard thread cap. */
+    if (limits->required) goto unavailable;
+#else
+    if (limits->required) goto unavailable;
+#endif
+    result = spawn_process(process, argv, logpath,
+#ifdef _WIN32
+                           limits->memory_bytes,
+#else
+                           0,
+#endif
+                           0, limits, error, capacity);
+    if (result) {
+#ifdef __linux__
+        if (process->cgroup[0]) rmdir(process->cgroup);
+#endif
+        process->cgroup[0] = 0;
+    }
+    return result;
+unavailable:
+#ifdef __linux__
+    if (process->cgroup[0]) rmdir(process->cgroup);
+#endif
+    process->cgroup[0] = 0;
+    snprintf(error, capacity, "VM isolation unavailable: delegate cgroup v2 cpu,memory,pids controllers via MEGAS_CGROUP_PARENT. No unbounded VM was started.");
+    return -1;
 }
 int mgp_spawn(MgpProcess *process, char *const argv[], const char *logpath,
               char *error, size_t capacity)
@@ -740,6 +852,67 @@ void mgp_reap(MgpProcess *process)
     if (!process->pid && process->group && kill(-process->group, 0) && errno == ESRCH) {
         process->group = 0;
     }
+#ifdef __linux__
+    if (!process->pid && !process->group && process->cgroup[0] && !rmdir(process->cgroup))
+        process->cgroup[0] = 0;
+#endif
+#endif
+}
+uint64_t mgp_available_memory(void)
+{
+#ifdef _WIN32
+    MEMORYSTATUSEX memory;
+    memset(&memory, 0, sizeof(memory)); memory.dwLength = sizeof(memory);
+    return GlobalMemoryStatusEx(&memory) ? memory.ullAvailPhys : 0;
+#elif defined(__linux__)
+    FILE *file = mgp_fopen("/proc/meminfo", "r");
+    char line[256];
+    unsigned long long kb = 0;
+    if (!file) return 0;
+    while (fgets(line, sizeof(line), file)) if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1) break;
+    fclose(file); return (uint64_t)kb * 1024;
+#else
+    return 0;
+#endif
+}
+unsigned mgp_process_threads(MgpProcess *process)
+{
+#ifdef _WIN32
+    unsigned count = 0;
+    THREADENTRY32 entry;
+    HANDLE snapshot;
+    if (!process || !process->pid) return 0;
+    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    memset(&entry, 0, sizeof(entry)); entry.dwSize = sizeof(entry);
+    if (Thread32First(snapshot, &entry)) do {
+        if (entry.th32OwnerProcessID == process->pid) count++;
+    } while (Thread32Next(snapshot, &entry));
+    CloseHandle(snapshot); return count;
+#elif defined(__linux__)
+    char path[64], line[256];
+    FILE *file;
+    unsigned count = 0;
+    if (!process || process->pid <= 0) return 0;
+    /* memory sampler resolves a namespace PID once and caches the host PID. */
+    if (process->host_pid <= 0) (void)mgp_memory_bytes(process);
+    if (process->host_pid <= 0) return 0;
+    snprintf(path, sizeof(path), "/proc/%ld/status", (long)process->host_pid);
+    file = mgp_fopen(path, "r");
+    if (!file) return 0;
+    while (fgets(line, sizeof(line), file)) if (sscanf(line, "Threads: %u", &count) == 1) break;
+    fclose(file); return count;
+#else
+    (void)process; return 0;
+#endif
+}
+const char *mgp_default_accel(void)
+{
+#ifdef __linux__
+    return access("/dev/kvm", R_OK | W_OK) == 0 ? "kvm" : "tcg";
+#else
+    /* Hardware acceleration on these hosts must be explicitly requested. */
+    return "tcg";
 #endif
 }
 int mgp_owner_lock(const char *path, intptr_t *lock)

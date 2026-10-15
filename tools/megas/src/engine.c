@@ -4,6 +4,7 @@
 #include "platform.h"
 #include "guest.h"
 #include "seed.h"
+#include "live.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,8 @@ typedef struct { MgpSocket socket;
  char request[REQUEST_CAP];
  size_t used;
  uint64_t accepted;
+ char *response;
+ size_t response_used, response_sent;
  } Client;
 
 struct MgEngine {
@@ -73,6 +76,13 @@ struct MgEngine {
     MgStatus status;
 
     MgRfb *display;
+    MgLive *live;
+    char android_state[MG_LIVE_LINE], android_epoch[65];
+    char android_outcome[32];
+    uint64_t android_revision, android_received, android_generation;
+    uint64_t android_action_id, android_pending, android_queued, android_completed;
+    uint64_t android_events, android_rejected, resource_sample;
+    int android_uncertain, include_image;
 
     MgpSocket qmp, listener;
 
@@ -1245,6 +1255,14 @@ cfg->height=720;
 cfg->qmp_port=49392;
 cfg->vnc_port=49393;
 cfg->qga_port=49394;
+cfg->android_port=49395;
+cfg->video_port=49396;
+cfg->stream_port=49397;
+cfg->cpus=1;
+cfg->cpu_percent=100;
+cfg->max_threads=48;
+snprintf(cfg->accel,sizeof(cfg->accel),"auto");
+if(!mgp_env("MEGAS_CGROUP_PARENT",env,sizeof(env)))snprintf(cfg->cgroup_parent,sizeof(cfg->cgroup_parent),"%s",env);
 cfg->passwordless=1;
 
 }
@@ -1701,13 +1719,16 @@ static void ocr_tick(MgEngine *e)
 static int vm_start(MgEngine *e,Json *j) {
     char qmp[128],vnc[128],qga[160],memory[32],video[128],disk[4096],cdrom[4096],seed_file[4096],seed_raw[512],seed_path[1024],username[33],password[257]="",bios[1024],error[512],data_dir[1024],helpers[1024];
 
-    char *argv[48];
+    char *argv[64];
+    char accel[64], smp[32], android_control[180], android_video[180];
+    MgpVmLimits limits;
+    MgConfig prior=e->cfg;
 int n=0;
 Buffer b;
     const char *extension;
 char checkpoint_status[192];
 int login_enabled=e->cfg.passwordless;
-#define VM_START_FAIL() do { wipe_memory(password,sizeof(password)); return -1; } while (0)
+#define VM_START_FAIL() do { if(!e->status.owned_pid)e->cfg=prior; wipe_memory(password,sizeof(password)); return -1; } while (0)
 
     if(e->status.owned_pid&&mgp_alive(&e->process)){
         if(e->status.connected){feedback(e,"VM is already running; its current state is returned.");return 0;}
@@ -1720,6 +1741,32 @@ int login_enabled=e->cfg.passwordless;
     if(config_string(j,"qemu",e->cfg.qemu,sizeof(e->cfg.qemu))||config_string(j,"disk",e->cfg.disk,sizeof(e->cfg.disk))||config_string(j,"iso",e->cfg.iso,sizeof(e->cfg.iso))||config_string(j,"seed_iso",e->cfg.seed_iso,sizeof(e->cfg.seed_iso))){feedback(e,"A file path is missing, too long or invalid JSON text.");
 VM_START_FAIL();
 }
+    { unsigned value; int token;
+      static const char *const keys[]={"cpus","cpu_percent","max_threads","android_port","video_port","stream_port"};
+      unsigned *fields[]={&e->cfg.cpus,&e->cfg.cpu_percent,&e->cfg.max_threads,&e->cfg.android_port,&e->cfg.video_port,&e->cfg.stream_port};
+      unsigned i;
+      for(i=0;i<6;i++)if((token=jget(j,0,keys[i]))>=0){
+          if(jnumber(j,token,&value)){feedback(e,"%s must be an integer.",keys[i]);VM_START_FAIL();}
+          *fields[i]=value;
+      }
+      token=jget(j,0,"android");
+      if(token>=0){
+          if(!jeq(j,token,"true")&&!jeq(j,token,"false")){feedback(e,"android must be boolean.");VM_START_FAIL();}
+          e->cfg.android=jeq(j,token,"true");
+      }
+      if(config_string(j,"accel",e->cfg.accel,sizeof(e->cfg.accel))||
+         config_string(j,"cgroup_parent",e->cfg.cgroup_parent,sizeof(e->cfg.cgroup_parent))){feedback(e,"Invalid acceleration or delegated resource path.");VM_START_FAIL();}
+      if(!strcmp(e->cfg.accel,"auto"))snprintf(e->cfg.accel,sizeof(e->cfg.accel),"%s",mgp_default_accel());
+      if(strcmp(e->cfg.accel,"kvm")&&strcmp(e->cfg.accel,"whpx")&&strcmp(e->cfg.accel,"hvf")&&strcmp(e->cfg.accel,"tcg")){
+          feedback(e,"Choose auto, kvm, whpx, hvf or explicitly tcg. Accelerators never silently fall back.");VM_START_FAIL();
+      }
+      if(e->cfg.cpus<1||e->cfg.cpus>4||e->cfg.cpu_percent<1||e->cfg.cpu_percent>400||e->cfg.max_threads<8||e->cfg.max_threads>128){
+          feedback(e,"Choose 1-4 vCPUs, CPU budget 1-400 percent of one host CPU and 8-128 host tasks.");VM_START_FAIL();
+      }
+      if(e->cfg.android&&!strcmp(e->cfg.accel,"tcg")){
+          feedback(e,"Android native profile requires an explicitly available hardware accelerator; TCG is software emulation.");VM_START_FAIL();
+      }
+    }
     snprintf(username,sizeof(username),"megas");
     if(config_string(j,"username",username,sizeof(username))||config_string(j,"password",password,sizeof(password))){feedback(e,"Guest username or password exceeds its supported size.");wipe_memory(password,sizeof(password));return -1;}
     {int policy=jget(j,0,"passwordless");
@@ -1727,8 +1774,8 @@ VM_START_FAIL();
             else if(jeq(j,policy,"false"))login_enabled=0;
             else {feedback(e,"passwordless must be a JSON boolean.");VM_START_FAIL();}}
     }
-    if(login_enabled&&password[0]){feedback(e,"Omit password when enabling passwordless sign-in; no guest command was sent.");wipe_memory(password,sizeof(password));return -1;}
-    if(!login_enabled&&!password[0]){feedback(e,"A new managed guest starts with a locked account. Choose passwordless sign-in or provide a password before starting.");wipe_memory(password,sizeof(password));return -1;}
+    if(!e->cfg.android&&login_enabled&&password[0]){feedback(e,"Omit password when enabling passwordless sign-in; no guest command was sent.");wipe_memory(password,sizeof(password));return -1;}
+    if(!e->cfg.android&&!login_enabled&&!password[0]){feedback(e,"A new managed guest starts with a locked account. Choose passwordless sign-in or provide a password before starting.");wipe_memory(password,sizeof(password));return -1;}
     e->cfg.passwordless=login_enabled;
     e->cfg.ram_mb=number_or(j,"ram_mb",e->cfg.ram_mb);
 e->cfg.width=number_or(j,"width",e->cfg.width);
@@ -1740,7 +1787,15 @@ VM_START_FAIL();
     if(!e->cfg.qemu[0]){feedback(e,"Select a QEMU executable first.");
 wipe_memory(password,sizeof(password));return -1;
 }
-    if(guest_helper_dir(helpers,sizeof(helpers))){feedback(e,"Megas guest helpers are missing from the package; the managed guest policy cannot be verified.");wipe_memory(password,sizeof(password));return -1;}
+    if(!e->cfg.android&&guest_helper_dir(helpers,sizeof(helpers))){feedback(e,"Megas guest helpers are missing from the package; the managed guest policy cannot be verified.");wipe_memory(password,sizeof(password));return -1;}
+    limits.cgroup_parent=e->cfg.cgroup_parent;
+    limits.memory_bytes=((uint64_t)e->cfg.ram_mb+256)*1024*1024;
+    limits.cpu_percent=e->cfg.cpu_percent;limits.tasks=e->cfg.max_threads;
+    limits.required=e->cfg.android||e->cfg.cgroup_parent[0];
+    {uint64_t available=mgp_available_memory();
+     if(available&&available<limits.memory_bytes+256ULL*1024*1024){
+         feedback(e,"Insufficient available host RAM for VM RAM, 256 MiB emulator allowance and 256 MiB host reserve. No VM started.");VM_START_FAIL();
+     }}
     snprintf(qmp,sizeof(qmp),"tcp:127.0.0.1:%u,server=on,wait=off",e->cfg.qmp_port);
 snprintf(vnc,sizeof(vnc),"127.0.0.1:%u",e->cfg.vnc_port-5900);
     snprintf(qga,sizeof(qga),"socket,id=megas-qga,host=127.0.0.1,port=%u,server=on,wait=off",e->cfg.qga_port);
@@ -1749,6 +1804,10 @@ snprintf(vnc,sizeof(vnc),"127.0.0.1:%u",e->cfg.vnc_port-5900);
 snprintf(video,sizeof(video),"virtio-vga,xres=%u,yres=%u",e->cfg.width,e->cfg.height);
 
     argv[n++]=e->cfg.qemu;
+argv[n++]="-accel";
+snprintf(accel,sizeof(accel),"%s%s",e->cfg.accel,!strcmp(e->cfg.accel,"tcg")?",thread=single":"");
+argv[n++]=accel;
+argv[n++]="-smp";snprintf(smp,sizeof(smp),"%u",e->cfg.cpus);argv[n++]=smp;
 argv[n++]="-m";
 argv[n++]=memory;
 argv[n++]="-qmp";
@@ -1772,6 +1831,18 @@ argv[n++]="-device";
 argv[n++]="virtio-serial-pci";
 argv[n++]="-device";
 argv[n++]="virtserialport,chardev=megas-qga,name=org.qemu.guest_agent.0";
+    if(e->cfg.android){
+        unsigned ports[]={e->cfg.control_port,e->cfg.qmp_port,e->cfg.vnc_port,e->cfg.qga_port,e->cfg.android_port,e->cfg.video_port,e->cfg.stream_port};
+        unsigned a,c;
+        for(a=0;a<7;a++){if(!ports[a]||ports[a]>65535){feedback(e,"Invalid Android channel port.");VM_START_FAIL();}
+            for(c=0;c<a;c++)if(ports[a]==ports[c]){feedback(e,"Every VM channel needs a distinct loopback port.");VM_START_FAIL();}}
+        snprintf(android_control,sizeof(android_control),"socket,id=megas-control,host=127.0.0.1,port=%u,server=on,wait=off",e->cfg.android_port);
+        snprintf(android_video,sizeof(android_video),"socket,id=megas-video,host=127.0.0.1,port=%u,server=on,wait=off",e->cfg.video_port);
+        argv[n++]="-chardev";argv[n++]=android_control;
+        argv[n++]="-device";argv[n++]="virtserialport,chardev=megas-control,name=org.megas.control";
+        argv[n++]="-chardev";argv[n++]=android_video;
+        argv[n++]="-device";argv[n++]="virtserialport,chardev=megas-video,name=org.megas.video";
+    }
 
     if(e->cfg.disk[0]){
         extension=strrchr(e->cfg.disk,'.');
@@ -1801,6 +1872,7 @@ if(e->cfg.iso[i]==',')cdrom[used++]=',';
 argv[n++]="-cdrom";
 argv[n++]=cdrom;
 }
+    if(!e->cfg.android){
     if(e->cfg.seed_iso[0]) {
         snprintf(seed_path,sizeof(seed_path),"%s",e->cfg.seed_iso);
         if(!mgp_file_size(seed_path)) {feedback(e,"The configured NoCloud seed ISO does not exist or is empty.");VM_START_FAIL();}
@@ -1822,6 +1894,7 @@ argv[n++]=cdrom;
     argv[n++]="-blockdev";argv[n++]=seed_file;
     argv[n++]="-blockdev";argv[n++]=seed_raw;
     argv[n++]="-device";argv[n++]="ide-cd,drive=megasseed";
+    }
     snprintf(bios,sizeof(bios),"%s",e->cfg.qemu);
 {char *p=strrchr(bios,'/');
 
@@ -1855,7 +1928,13 @@ bstr(&audit,argv[n]);
 }bput(&audit,"]");
 if(journal(e,"process_spawn",command))VM_START_FAIL();
 }
-    if(mgp_spawn(&e->process,argv,e->qemu_log,error,sizeof(error))){feedback(e,"%s",error);
+    mg_live_free(e->live);e->live=NULL;
+    if(e->cfg.android){
+        e->live=mg_live_new(e->cfg.android_port,e->cfg.video_port,e->cfg.stream_port,e->token);
+        if(!e->live){feedback(e,"Live stream port unavailable; no Android VM was started.");VM_START_FAIL();}
+    }
+    if(mgp_spawn_vm(&e->process,argv,e->qemu_log,&limits,error,sizeof(error))){feedback(e,"%s",error);
+mg_live_free(e->live);e->live=NULL;
 VM_START_FAIL();
 }
     e->status.owned_pid=mgp_pid(&e->process);
@@ -1884,6 +1963,15 @@ strcpy(e->status.phase,"starting");
 feedback(e,"VM started. Live display is connected. %s",checkpoint_status);
 }
     refresh_state(e);
+    if(e->cfg.android){
+        e->android_state[0]=e->android_epoch[0]=0;e->android_revision=e->android_received=0;
+        e->android_pending=0;e->android_uncertain=0;e->android_generation=0;
+        e->auto_checkpoint=0;
+        e->include_image=jeq(j,jget(j,0,"include_image"),"true");
+        feedback(e,"Android VM started with bounded resources; waiting for its local semantic provider and encoded livestream.");
+        wipe_memory(password,sizeof(password));return 0;
+    }
+    e->auto_checkpoint=1;
     if (e->cfg.seed_iso[0]) {
         /* A caller-supplied seed owns account creation; apply only the explicit
          * policy requested by this start after the guest agent identifies it. */
@@ -2039,10 +2127,103 @@ for(i=0;aliases[i].from;i++)if(!strcmp(name,aliases[i].from))return aliases[i].t
 return name;
 
 }
+static void android_invalidate(MgEngine *e)
+{
+    e->android_state[0]=e->android_epoch[0]=0;
+    e->android_revision=e->android_received=0;
+    if(e->android_pending){e->android_uncertain=1;snprintf(e->android_outcome,sizeof(e->android_outcome),"uncertain");}
+}
+static void android_tick(MgEngine *e)
+{
+    const char *line;
+    Json *j;
+    uint64_t revision, id, guest_ms, cause;
+    char epoch[65], type[32], outcome[32];
+    if(!e->live)return;
+    mg_live_tick(e->live);
+    if(e->android_generation!=mg_live_generation(e->live)){
+        e->android_generation=mg_live_generation(e->live);
+        android_invalidate(e);
+    }
+    if(e->android_pending&&!e->android_uncertain&&mgp_now()-e->android_queued>=2000){
+        e->android_uncertain=1;snprintf(e->android_outcome,sizeof(e->android_outcome),"uncertain");
+        mg_live_abort_control(e->live);android_invalidate(e);
+        journal(e,"android_action_uncertain","Guest result deadline expired; no automatic replay. Inspect state and explicitly acknowledge the uncertain action before another mutation.");
+    }
+    line=mg_live_line(e->live);
+    if(!line[0])return;
+    j=malloc(sizeof(*j));
+    if(!j)return;
+    if(jparse(j,line)||j->t[0].type!='{'||jstring(j,jget(j,0,"type"),type,sizeof(type)))goto invalid;
+    if(!strcmp(type,"state")){
+        if(jstring(j,jget(j,0,"epoch"),epoch,sizeof(epoch))||!epoch[0]||
+           juint64(j,jget(j,0,"revision"),&revision)||!revision||
+           juint64(j,jget(j,0,"guest_monotonic_ms"),&guest_ms)||
+           juint64(j,jget(j,0,"cause_action_id"),&cause)||
+           jget(j,0,"payload")<0)goto invalid;
+        if(e->android_epoch[0]&&strcmp(epoch,e->android_epoch))android_invalidate(e);
+        if(revision<=e->android_revision)goto invalid;
+        snprintf(e->android_epoch,sizeof(e->android_epoch),"%s",epoch);
+        snprintf(e->android_state,sizeof(e->android_state),"%s",line);
+        e->android_revision=revision;e->android_received=mgp_now();e->android_events++;
+        /* Private provider payloads are memory-only: never persist trees or text. */
+    }else if(!strcmp(type,"heartbeat")){
+        if(jstring(j,jget(j,0,"epoch"),epoch,sizeof(epoch))||strcmp(epoch,e->android_epoch)||
+           juint64(j,jget(j,0,"revision"),&revision)||revision!=e->android_revision||!revision)goto invalid;
+        e->android_received=mgp_now();
+    }else if(!strcmp(type,"result")){
+        if(juint64(j,jget(j,0,"id"),&id)||!id||id!=e->android_pending||
+           jstring(j,jget(j,0,"outcome"),outcome,sizeof(outcome))||
+           (strcmp(outcome,"applied")&&strcmp(outcome,"rejected")))goto invalid;
+        snprintf(e->android_outcome,sizeof(e->android_outcome),"%s",outcome);
+        e->android_completed=mgp_now();e->android_pending=0;e->android_uncertain=0;
+        if(!strcmp(outcome,"rejected"))e->android_rejected++;
+        journal(e,"android_action_result",outcome);
+    }else goto invalid;
+    free(j);return;
+invalid:
+    e->android_rejected++;
+    /* Invalid state cannot leave previously usable handles looking fresh. */
+    android_invalidate(e);
+    free(j);
+}
+static int android_act(MgEngine *e,Json *j)
+{
+    char epoch[65],target[257],operation[32],text[4097]="",wire[8192];
+    uint64_t revision;
+    Buffer b;
+    if(!e->cfg.android||!e->live||!mg_live_control_up(e->live)||!mg_live_video_up(e->live)||!e->status.running){
+        feedback(e,"Android semantic provider is unavailable; no coordinate or ADB fallback was used.");return -1;
+    }
+    if(e->android_pending){feedback(e,"Android action %llu is pending or uncertain; inspect state before another mutation.",(unsigned long long)e->android_pending);return -1;}
+    if(!e->android_received||mgp_now()-e->android_received>2000||
+       jstring(j,jget(j,0,"epoch"),epoch,sizeof(epoch))||strcmp(epoch,e->android_epoch)||
+       juint64(j,jget(j,0,"expected_revision"),&revision)||revision!=e->android_revision){
+        feedback(e,"Android state is missing, stale or has changed. Observe a fresh state and use its epoch/revision.");return -1;
+    }
+    if(jget(j,0,"x")>=0||jget(j,0,"y")>=0||
+       jstring(j,jget(j,0,"target"),target,sizeof(target))||!target[0]||
+       jstring(j,jget(j,0,"operation"),operation,sizeof(operation))||
+       config_string(j,"text",text,sizeof(text))){feedback(e,"Choose a provider-issued target and semantic operation; coordinate actions are forbidden.");return -1;}
+    if(strcmp(operation,"click")&&strcmp(operation,"long_click")&&strcmp(operation,"set_text")&&
+       strcmp(operation,"scroll_forward")&&strcmp(operation,"scroll_backward")&&strcmp(operation,"focus")){
+        feedback(e,"Unsupported semantic operation; no input was sent.");return -1;
+    }
+    binit(&b,wire,sizeof(wire));
+    bfmt(&b,"{\"type\":\"action\",\"id\":%llu,\"expected_revision\":%llu,\"epoch\":",
+          (unsigned long long)(e->android_action_id+1),(unsigned long long)revision);
+    bstr(&b,epoch);bput(&b,",\"target\":");bstr(&b,target);
+    bput(&b,",\"operation\":");bstr(&b,operation);bput(&b,",\"text\":");bstr(&b,text);bput(&b,"}");
+    if(b.error||mg_live_send(e->live,wire)){feedback(e,"Semantic transport busy; no action was queued.");return -1;}
+    e->android_pending=++e->android_action_id;e->android_queued=mgp_now();e->android_completed=0;
+    snprintf(e->android_outcome,sizeof(e->android_outcome),"queued");
+    feedback(e,"Android action %llu queued; this is transport acceptance, not confirmed task success.",(unsigned long long)e->android_pending);
+    return 0;
+}
 static void response(MgEngine *e,int ok,const char *action,char *out,size_t cap,int include_steps) {
     Buffer b;
 unsigned i;
-int image=export_live(e)==0;
+int image=e->include_image&&export_live(e)==0;
 int ocr_status=e->ocr_status;
 char fallback[1024];
 
@@ -2063,7 +2244,24 @@ bstr(&b,e->status.phase);
     bstr(&b,e->guest_kind);
     bfmt(&b,",\"guest_pid\":%llu,\"automatic_pending\":%s,\"progress\":",(unsigned long long)e->guest_pid,e->guest_auto_pending?"true":"false");
     bstr(&b,e->guest_progress);
-    bput(&b,"}},\"ocr\":{\"status\":");
+    bput(&b,"}},\"resources\":{\"accel\":");bstr(&b,e->cfg.accel);
+    bfmt(&b,",\"vcpus\":%u,\"cpu_percent_of_one_core\":%u,\"max_host_tasks\":%u,\"qemu_threads\":%u,\"qemu_memory_bytes\":%llu,\"hard_task_limit\":%s},",
+          e->cfg.cpus,e->cfg.cpu_percent,e->cfg.max_threads,e->status.qemu_threads,
+          (unsigned long long)e->status.qemu_memory_bytes,e->process.cgroup[0]?"true":"false");
+    bfmt(&b,"\"android\":{\"enabled\":%s,\"provider_connected\":%s,\"state_age_ms\":%llu,\"events\":%llu,\"rejected\":%llu,\"pending_action_id\":%llu,\"uncertain\":%s,\"last_action_id\":%llu,\"outcome\":",
+          e->cfg.android?"true":"false",mg_live_control_up(e->live)?"true":"false",
+          (unsigned long long)(e->android_received?mgp_now()-e->android_received:0),
+          (unsigned long long)e->android_events,(unsigned long long)e->android_rejected,
+          (unsigned long long)e->android_pending,e->android_uncertain?"true":"false",(unsigned long long)e->android_action_id);
+    bstr(&b,e->android_outcome);
+    bfmt(&b,",\"queued_host_ms\":%llu,\"completed_host_ms\":%llu,\"round_trip_ms\":%llu,\"observed\":",
+          (unsigned long long)e->android_queued,(unsigned long long)e->android_completed,
+          (unsigned long long)(e->android_completed?e->android_completed-e->android_queued:0));
+    bput(&b,e->android_state[0]?e->android_state:"null");
+    bfmt(&b,"},\"livestream\":{\"available\":%s,\"transport\":\"mpegts-http\",\"url\":\"http://127.0.0.1:%u/live.ts\",\"authorization\":\"Bearer session credential; never put it in a URL\",\"bytes_relayed\":%llu,\"source_age_ms\":%llu,\"slow_clients_disconnected\":%llu},\"ocr\":{\"status\":",
+          mg_live_video_up(e->live)?"true":"false",e->cfg.stream_port,
+          (unsigned long long)mg_live_bytes(e->live),(unsigned long long)mg_live_video_age(e->live),
+          (unsigned long long)mg_live_slow_clients(e->live));
     bstr(&b,ocr_status_name(ocr_status));
     bfmt(&b,",\"generation\":%llu,\"pid\":%llu,\"peak_memory_bytes\":%llu,\"text\":",
          (unsigned long long)e->ocr_generation,(unsigned long long)e->ocr_pid,
@@ -2116,6 +2314,7 @@ if(b.error&&cap>512)snprintf(out,cap,"{\"ok\":false,\"feedback\":\"Response capa
 }
 static int vm_stop(MgEngine *e) {
     uint64_t deadline;
+    mg_live_free(e->live);e->live=NULL;android_invalidate(e);
 
     if(!e->status.owned_pid){feedback(e,"VM is already stopped.");
 return 0;
@@ -2523,9 +2722,11 @@ static void json_safe_value(Json *j, int token, Buffer *b)
         b->n+=(size_t)length;b->s[b->n]=0;
     }
 }
-static int request_log(MgEngine *e,Json *j) {
+static int request_log(MgEngine *e,Json *j,const char *action) {
     char sanitized[REQUEST_CAP];
 Buffer b;
+    if(!strcmp(action,"android_act"))
+        return journal(e,"action_request","Android semantic action requested; private target and text are not persisted.");
 
     binit(&b,sanitized,sizeof(sanitized));
 json_safe_value(j,0,&b);
@@ -2543,11 +2744,13 @@ int ok=-1,mutating=0,capture=0;
 History *h=NULL;
 
     if(!e||!request||!out||cap<512)return -1;
+    e->include_image=!e->cfg.android;
 
     j=malloc(sizeof(*j));
 if(!j)return -1;
 
     request_length=strlen(request);
+    e->include_image=!e->cfg.android;
     if(request_length>=REQUEST_CAP){feedback(e,"Use a JSON object with an action. Invalid input is logged and the controller stays available.");
 journal(e,"invalid_request","Malformed or oversized JSON object received.");
 goto done;
@@ -2571,6 +2774,11 @@ for(i=0;requested[i];i++)requested[i]=(char)tolower((unsigned char)requested[i])
 }
     snprintf(action,sizeof(action),"%s",normalize(requested));
 if(strcmp(action,requested))e->status.normalized++;
+    {int image=jget(j,0,"include_image");
+     if(image>=0&&!jeq(j,image,"true")&&!jeq(j,image,"false")){feedback(e,"include_image must be boolean.");goto done;}
+     e->include_image=image>=0?jeq(j,image,"true"):!e->cfg.android;
+     if(!strcmp(action,"screenshot")||!strcmp(action,"ocr"))e->include_image=1;
+    }
 
     e->transient_response = jeq(j,jget(j,0,"checkpoint"),"false") && (!strcmp(action,"pointer") || (!strcmp(action,"key") && jget(j,0,"down")>=0));
     e->status.actions++;
@@ -2580,18 +2788,27 @@ memset(h,0,sizeof(*h));
 h->step=e->status.actions;
 snprintf(h->action,sizeof(h->action),"%.31s",action);
 
-    if(request_log(e,j)&&strcmp(action,"status")&&strcmp(action,"steps")&&strcmp(action,"repair")&&strcmp(action,"stop")){feedback(e,"Forensic journal cannot accept more data. No mutation ran; preserve/export the journal and repair its storage.");
+    if(request_log(e,j,action)&&strcmp(action,"status")&&strcmp(action,"steps")&&strcmp(action,"repair")&&strcmp(action,"stop")){feedback(e,"Forensic journal cannot accept more data. No mutation ran; preserve/export the journal and repair its storage.");
 goto done;
 }
-    mutating=strcmp(action,"status")&&strcmp(action,"steps")&&strcmp(action,"repair")&&strcmp(action,"screenshot")&&strcmp(action,"stop")&&strcmp(action,"ocr");
+    mutating=strcmp(action,"status")&&strcmp(action,"android_observe")&&strcmp(action,"steps")&&strcmp(action,"repair")&&strcmp(action,"screenshot")&&strcmp(action,"stop")&&strcmp(action,"ocr");
 
     if(mutating&&(e->job_active||e->late_id||
        (e->guest_active&&(!e->guest_auto_running||e->guest.uncertain)))){feedback(e,"Previous operation is still unconfirmed. New mutations are held while live state remains visible.");
 goto done;
 }
-    if(!strcmp(action,"status")||!strcmp(action,"steps")||!strcmp(action,"repair")){ok=0;
+    if(!strcmp(action,"status")||!strcmp(action,"steps")||!strcmp(action,"repair")||!strcmp(action,"android_observe")){ok=0;
 goto done;
 }
+    if(!strcmp(action,"android_act")){ok=android_act(e,j);goto done;}
+    if(!strcmp(action,"android_ack_uncertain")){
+        uint64_t id;
+        if(!e->android_uncertain||juint64(j,jget(j,0,"id"),&id)||id!=e->android_pending){feedback(e,"Acknowledge the exact uncertain action id after inspecting its effects.");goto done;}
+        e->android_pending=0;e->android_uncertain=0;
+        snprintf(e->android_outcome,sizeof(e->android_outcome),"acknowledged_uncertain");
+        feedback(e,"Uncertain action acknowledged; no input was replayed. Observe fresh state before continuing.");
+        android_invalidate(e);ok=0;goto done;
+    }
     if(!strcmp(action,"create")){ok=create_disk(e,j); goto done;}
     if(!strcmp(action,"start")){ok=vm_start(e,j);
 goto done;
@@ -2627,6 +2844,7 @@ goto done;
 }
         checkpoint_index=snapshot_find(e,name);
         if(checkpoint_index<0){feedback(e,"Choose a checkpoint from the verified QEMU catalog shown in steps.");ok=-1;goto done;}
+        android_invalidate(e);
         ok=snapshot(e,"snapshot-load",e->snapshots[checkpoint_index].tag);
 if(!ok)feedback(e,"Checkpoint '%s' restored and confirmed in %.0f ms.",name,e->status.last_restore_ms);
 goto done;
@@ -2653,6 +2871,9 @@ goto done;
     }
     if(!strcmp(action,"ocr")){ok=ocr_start(e,j);goto done;}
     if(!strcmp(action,"pause")||!strcmp(action,"resume")||!strcmp(action,"reset")||!strcmp(action,"key")||!strcmp(action,"type")||!strcmp(action,"click")||!strcmp(action,"pointer")||!strcmp(action,"resize")){
+        if(e->cfg.android&&(!strcmp(action,"key")||!strcmp(action,"type")||!strcmp(action,"click")||!strcmp(action,"pointer"))){
+            feedback(e,"Android agent input requires android_act with an observed target and revision. Raw input and coordinate guessing are disabled.");goto done;
+        }
         if(!e->status.connected){feedback(e,"Start the VM before sending this action.");
 goto done;
 }
@@ -2666,7 +2887,7 @@ if(snapshot_save(e,desired,1,h->before,sizeof(h->before)))goto done;
 
         else if(!strcmp(action,"resume"))ok=qmp_exec(e,"cont",NULL,COMMAND_MS);
 
-        else if(!strcmp(action,"reset"))ok=qmp_exec(e,"system_reset",NULL,COMMAND_MS);
+        else if(!strcmp(action,"reset")){android_invalidate(e);ok=qmp_exec(e,"system_reset",NULL,COMMAND_MS);}
 
         else if(!strcmp(action,"key"))ok=keys(e,j);
 
@@ -2732,7 +2953,8 @@ goto done;
 
 done:
     display_tick(e);
-if(e->status.connected&&!e->late_id&&!e->transient_response)refresh_state(e);
+    if(e->status.connected&&!e->late_id&&!e->transient_response&&
+       strcmp(action,"android_act")&&strcmp(action,"android_observe"))refresh_state(e);
 
     repair(e,action);
 
@@ -2778,6 +3000,14 @@ char error[512];
 
     if(e->qmp!=MGP_BAD_SOCKET)qmp_pump(e);
 display_tick(e);
+    android_tick(e);
+    e->status.android_ready=mg_live_control_up(e->live)&&e->android_received&&mgp_now()-e->android_received<=2000;
+    e->status.video_ready=mg_live_video_up(e->live);
+    if(e->status.owned_pid&&mgp_now()-e->resource_sample>=500){
+        e->resource_sample=mgp_now();
+        e->status.qemu_memory_bytes=mgp_memory_bytes(&e->process);
+        e->status.qemu_threads=mgp_process_threads(&e->process);
+    }
 
     if(e->job_active&&!e->late_id&&mgp_now()-e->last_job_poll>100){snapshot_poll(e);
 e->last_job_poll=mgp_now();
@@ -2790,6 +3020,7 @@ qmp_disconnect(e);
 strcpy(e->status.phase,"exited");
 feedback(e,"VM process exited. Its log and repair prompt are available.");
 repair(e,"process_exit");
+        mg_live_free(e->live);e->live=NULL;android_invalidate(e);
         if(e->guest_active){journal(e,"guest_job_cancelled","Owned QEMU exited before the guest helper confirmed completion.");mg_guest_clear(&e->guest);e->guest_active=0;}
         e->guest_auto_pending=0;e->guest_auto_running=0;
         wipe_memory(e->guest_auto_password,sizeof(e->guest_auto_password));
@@ -2816,7 +3047,7 @@ e->last_rfb_attempt=mgp_now();
                 listener_ready = 0;
             }else continue;
         }
-        if(c->socket!=MGP_BAD_SOCKET){int n=mgp_recv(c->socket,c->request+c->used,sizeof(c->request)-c->used-1);
+        if(c->socket!=MGP_BAD_SOCKET&&!c->response){int n=mgp_recv(c->socket,c->request+c->used,sizeof(c->request)-c->used-1);
 char *newline;
 
             if(n>0){c->used+=(size_t)n;
@@ -2830,21 +3061,28 @@ if(newline){char *answer=malloc(LINE_CAP);
                     else {journal(e,"control_auth_failed","Local control request rejected; token not logged.");
 feedback(e,"Local control credential was invalid.");
 repair(e,"authentication");
+e->include_image=0;
 response(e,0,"authentication",answer,LINE_CAP,0);
 }
-                    mgp_send_all(c->socket,answer,strlen(answer),500);
-mgp_send_all(c->socket,"\n",1,100);
-free(answer);
-}mgp_close(c->socket);
-c->socket=MGP_BAD_SOCKET;
+                    c->response=answer;c->response_used=strlen(answer);
+                    c->response[c->response_used++]='\n';c->response_sent=0;c->accepted=mgp_now();
+}else{mgp_close(c->socket);c->socket=MGP_BAD_SOCKET;}
 }
             }else if(n==0||n==-1){mgp_close(c->socket);
 c->socket=MGP_BAD_SOCKET;
 }
-            if(c->socket!=MGP_BAD_SOCKET&&(c->used==sizeof(c->request)-1||mgp_now()-c->accepted>2000)){journal(e,"control_request_expired","Oversized or incomplete local request discarded.");
+            if(c->socket!=MGP_BAD_SOCKET&&!c->response&&(c->used==sizeof(c->request)-1||mgp_now()-c->accepted>2000)){journal(e,"control_request_expired","Oversized or incomplete local request discarded.");
 mgp_close(c->socket);
 c->socket=MGP_BAD_SOCKET;
 }
+        }
+        if(c->socket!=MGP_BAD_SOCKET&&c->response){
+            int n=mgp_send(c->socket,c->response+c->response_sent,c->response_used-c->response_sent);
+            if(n>0)c->response_sent+=(size_t)n;
+            if(n==0||n==-1||c->response_sent==c->response_used||mgp_now()-c->accepted>2000){
+                mgp_close(c->socket);c->socket=MGP_BAD_SOCKET;
+                free(c->response);c->response=NULL;
+            }
         }
     }
     return 0;
@@ -2866,6 +3104,7 @@ mgp_sleep(10);
 if(mgp_alive(&e->harnesses[i]))mgp_force_kill(&e->harnesses[i]);
 }mgp_reap(&e->harnesses[i]);
 mgp_close(e->clients[i].socket);
+free(e->clients[i].response);
 }
     if(e->journal){journal(e,"owner_exit","Controller closed; no owned QEMU process left running.");
 fclose(e->journal);
@@ -2876,6 +3115,7 @@ if(e->owner_lock!=-1)mgp_owner_unlock(e->owner_lock);
 
     if(e->token_path[0])mgp_remove(e->token_path);
 mg_rfb_free(e->display);
+mg_live_free(e->live);
 free(e);
 
 }

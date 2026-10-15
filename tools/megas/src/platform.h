@@ -8,7 +8,7 @@
 #include <winsock2.h>
 #include <windows.h>
 typedef SOCKET MgpSocket;
-typedef struct { HANDLE handle, job; DWORD pid; int exit_code; } MgpProcess;
+typedef struct { HANDLE handle, job; DWORD pid; int exit_code; char cgroup[1024]; } MgpProcess;
 #define MGP_BAD_SOCKET INVALID_SOCKET
 #else
 #include <sys/types.h>
@@ -17,6 +17,7 @@ typedef struct {
     pid_t pid, group, host_pid;
     uint64_t host_scan_ms;
     int exit_code;
+    char cgroup[1024];
 } MgpProcess;
 #define MGP_BAD_SOCKET (-1)
 #endif
@@ -46,6 +47,19 @@ int mgp_spawn(MgpProcess *process, char *const argv[], const char *logpath, char
 int mgp_spawn_bounded(MgpProcess *process, char *const argv[], const char *logpath,
                       uint64_t memory_bytes, unsigned cpu_seconds,
                       char *error, size_t capacity);
+/* VM limits: CPU is percent of one host CPU; memory includes emulator overhead.
+ * Linux needs a caller-delegated cgroup v2 parent. Never changes host limits. */
+typedef struct {
+    const char *cgroup_parent;
+    uint64_t memory_bytes;
+    unsigned cpu_percent, tasks;
+    int required;
+} MgpVmLimits;
+int mgp_spawn_vm(MgpProcess *, char *const argv[], const char *logpath,
+                 const MgpVmLimits *, char *error, size_t capacity);
+unsigned mgp_process_threads(MgpProcess *);
+uint64_t mgp_available_memory(void);
+const char *mgp_default_accel(void);
 int mgp_alive(MgpProcess *process);
 int mgp_pid(MgpProcess *process);
 uint64_t mgp_memory_bytes(MgpProcess *process);

@@ -12,8 +12,8 @@ TESSERACT_DATA ?=
 CPPFLAGS += -Isrc -Ivendor
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -Wall -Wextra
-COMMON = src/main.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c
-HEADERS = src/megas.h src/rfb.h src/platform.h src/guest.h src/seed.h
+COMMON = src/main.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c src/live.c
+HEADERS = src/megas.h src/rfb.h src/platform.h src/guest.h src/seed.h src/live.h
 WINDOWS := $(if $(filter Windows_NT,$(OS)),1,$(if $(findstring mingw,$(CC)),1,0))
 ifeq ($(WINDOWS),1)
 EXE = .exe
@@ -28,6 +28,7 @@ CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 endif
 
 .PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle test-task-budget bundle
+.PHONY: test-stream test-android
 all: $(BUILD)/megas$(EXE)
 headless: $(BUILD)/megas-headless$(EXE)
 $(BUILD):
@@ -48,20 +49,28 @@ $(BUILD)/test-seed$(EXE): tests/test_seed.c src/seed.c src/platform.c $(wildcard
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_seed.c src/seed.c src/platform.c $(CORE_LIBS) $(LDLIBS)
 test-seed: $(BUILD)/test-seed$(EXE)
 	"./$(BUILD)/test-seed$(EXE)"
+$(BUILD)/live-fixture$(EXE): tests/live_fixture.c src/live.c src/platform.c src/live.h src/platform.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/live_fixture.c src/live.c src/platform.c $(CORE_LIBS) $(LDLIBS)
+test-stream: $(BUILD)/live-fixture$(EXE)
+	$(PYTHON) tests/test_stream.py "$(BUILD)/live-fixture$(EXE)"
 ifeq ($(WINDOWS),0)
-$(BUILD)/test-engine: tests/test_engine.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c $(wildcard $(HEADERS)) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_engine.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c -lm $(LDLIBS)
+$(BUILD)/test-android: tests/test_android.c $(filter-out src/main.c,$(COMMON)) $(HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_android.c $(filter-out src/main.c src/engine.c,$(COMMON)) -lm $(LDLIBS)
+test-android: $(BUILD)/test-android
+	"./$(BUILD)/test-android"
+$(BUILD)/test-engine: tests/test_engine.c $(filter-out src/main.c,$(COMMON)) $(wildcard $(HEADERS)) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_engine.c $(filter-out src/main.c,$(COMMON)) -lm $(LDLIBS)
 test-engine: $(BUILD)/test-engine
 	"./$(BUILD)/test-engine"
 $(BUILD)/test-guest: tests/test_guest.c src/guest.c src/platform.c $(wildcard src/guest.h src/platform.h) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -pthread -o "$@" tests/test_guest.c src/guest.c src/platform.c $(LDLIBS)
 test-guest: $(BUILD)/test-guest
 	"./$(BUILD)/test-guest"
-test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-live test-agent test-task-budget
+test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-live test-agent test-task-budget test-stream test-android
 else
-test-engine test-guest:
+test-engine test-guest test-android:
 	@echo "SKIP: $@ uses POSIX-only test fixtures and is not run on Windows."
-test: test-rfb test-platform test-seed test-bundle test-live test-agent test-task-budget
+test: test-rfb test-platform test-seed test-bundle test-live test-agent test-task-budget test-stream
 endif
 test-bundle:
 	$(PYTHON) tests/test_bundle.py

@@ -301,7 +301,7 @@ static void tool_result(unsigned port, Span id, const char *reply, int vision, i
     FILE *f = open_image(reply);
     char ocr_text[8192] = {0}, ocr_message[512] = {0}, combined[8704];
     unsigned long long generation = 0;
-    int has_ocr = f && auto_ocr(port, reply, ocr_text, sizeof(ocr_text),
+    int has_ocr = vision == 2 && f && auto_ocr(port, reply, ocr_text, sizeof(ocr_text),
                                 ocr_message, sizeof(ocr_message), &generation);
     if (property(all, "ok", &ok) && ok.b - ok.a == 5 &&
         !memcmp(ok.a, "false", 5)) { failure = 1; }
@@ -315,14 +315,14 @@ static void tool_result(unsigned port, Span id, const char *reply, int vision, i
         fputs(",{\"type\":\"text\",\"text\":", stdout);
         quoted(combined);
         putchar('}');
-    } else if (f) {
+    } else if (f && vision == 2) {
         fputs(",{\"type\":\"text\",\"text\":", stdout);
         quoted(ocr_message[0] ? ocr_message : "OCR unavailable; controller metadata is not screen text.");
         putchar('}');
-    } else {
+    } else if (!f) {
         fputs(",{\"type\":\"text\",\"text\":\"No current image is available, so OCR was not run. Screen text has not been OCR-decoded; the response contains controller metadata only.\"}", stdout);
     }
-    if (vision && f) { image_content(f); }
+    if (vision != 2 && f) { image_content(f); }
     if (f) fclose(f);
     printf("],\"isError\":%s}}\n", failure ? "true" : "false");
     fflush(stdout);
@@ -331,7 +331,18 @@ static void tool_result(unsigned port, Span id, const char *reply, int vision, i
 static void list_tools(Span id)
 {
     prefix(id);
-    fputs(",\"result\":{\"tools\":[{\"name\":\"megas_vm\",\"title\":\"Control the VM\",\"description\":\"Native VM control. Every result includes actual live state and the latest display image when available. Default agent mode returns PNG plus bounded Tesseract OCR text when OCR is available; --text-only returns actual OCR text or an honest unavailable message. Commands are audited; a confirmed checkpoint can be restored. Use status to inspect and repair for the forensic repair prompt. Never infer success from a requested action.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"start, status, pause, resume, stop, reset, key, click, type, resize, screenshot, checkpoint, restore, steps, password, doom, ocr, harness, repair\"},\"disk\":{\"type\":\"string\"},\"iso\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},\"enabled\":{\"type\":\"boolean\"},\"username\":{\"type\":\"string\"},\"password\":{\"type\":\"string\"},\"wad\":{\"type\":\"string\"}},\"required\":[\"action\"],\"additionalProperties\":true}}]}}\n", stdout);
+    fputs(",\"result\":{\"tools\":[{\"name\":\"megas_vm\",\"title\":\"Control the VM\","
+          "\"description\":\"Native VM state and livestream discovery. Android uses android_observe and android_act with provider-issued target, epoch and expected_revision. Never guess coordinates. Queued means accepted for transport, not completed. Inspect pending_action_id/outcome and independent task effects. Screenshots and OCR are explicit options; the default adapter does neither.\","
+          "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+          "\"action\":{\"type\":\"string\",\"description\":\"start, status, android_observe, android_act, android_ack_uncertain, pause, resume, stop, reset, screenshot, checkpoint, restore, steps, ocr, repair; non-Android guests also support key, click, type, resize, password, doom, harness\"},"
+          "\"android\":{\"type\":\"boolean\"},\"include_image\":{\"type\":\"boolean\",\"default\":false},"
+          "\"target\":{\"type\":\"string\"},\"epoch\":{\"type\":\"string\"},\"expected_revision\":{\"type\":\"integer\"},"
+          "\"operation\":{\"type\":\"string\",\"enum\":[\"click\",\"long_click\",\"set_text\",\"scroll_forward\",\"scroll_backward\",\"focus\"]},"
+          "\"disk\":{\"type\":\"string\"},\"iso\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},"
+          "\"cpus\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4},\"cpu_percent\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":400},"
+          "\"accel\":{\"type\":\"string\",\"enum\":[\"auto\",\"kvm\",\"whpx\",\"hvf\",\"tcg\"]},"
+          "\"key\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"}},"
+          "\"required\":[\"action\"],\"additionalProperties\":true}}]}}\n", stdout);
     fflush(stdout);
 }
 
@@ -383,7 +394,7 @@ int mg_agent_stdio(unsigned port, int vision)
                            "2024-11-05" : "2025-03-26";
             }
             prefix(id);
-            printf(",\"result\":{\"protocolVersion\":\"%s\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"MegasXLR\",\"version\":\"0.1.0\"},\"instructions\":\"Current VM state and image accompany every VM action. Read them before the next action; never ignore failed or stale state.\"}}\n", selected);
+            printf(",\"result\":{\"protocolVersion\":\"%s\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"MegasXLR\",\"version\":\"0.1.0\"},\"instructions\":\"Use semantic state plus the independently exposed continuous livestream. PNG and OCR are optional. Never ignore pending, failed or stale state; never guess Android coordinates.\"}}\n", selected);
             initialized = 1;
             fflush(stdout);
         } else if (equals(method, "ping")) {
@@ -400,7 +411,14 @@ int mg_agent_stdio(unsigned port, int vision)
                 continue;
             }
             n = (size_t)(args.b - args.a);
+            if(n+32>=AGENT_LINE_MAX){protocol_error(id,-32602,"Action exceeds the bounded input limit.");continue;}
             memcpy(request, args.a, n); request[n] = 0;
+            {Span image,action;
+             int explicit_capture=property(args,"action",&action)&&(equals(action,"screenshot")||equals(action,"ocr"));
+             if(!vision&&!explicit_capture&&!property(args,"include_image",&image)){
+                 snprintf(request+n-1,AGENT_LINE_MAX-n+1,"%s\"include_image\":false}",n>2?",":"");
+             }
+            }
             reply[0] = 0;
             {
                 int failure = mg_client(port, request, reply, AGENT_REPLY_MAX);

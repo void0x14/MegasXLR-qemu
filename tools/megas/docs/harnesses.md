@@ -1,3 +1,9 @@
+> Current default: `megas agent` returns semantic/controller state and livestream
+> discovery without PNG or automatic OCR. `--vision` explicitly enables image
+> results; `--text-only` explicitly selects the older OCR mode. The details below
+> describing default image/OCR behavior predate this default change. Android
+> actions require the local provider described in [android-integration.md](android-integration.md).
+
 # Ajan bağlantısı
 
 Megas VM'i tek bir yerel süreçte yönetir. Ajanlar yeni QEMU süreçleri

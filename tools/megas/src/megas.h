@@ -14,6 +14,9 @@ typedef struct {
     unsigned ram_mb, width, height;
     unsigned qmp_port, vnc_port, control_port;
     unsigned qga_port;
+    unsigned android_port, video_port, stream_port, cpus, cpu_percent, max_threads;
+    char accel[16], cgroup_parent[1024];
+    int android;
     int passwordless;
 } MgConfig;
 typedef struct {
@@ -22,6 +25,9 @@ typedef struct {
     unsigned width, height;
     int connected, running, owned_pid;
     double last_restore_ms;
+    unsigned qemu_threads;
+    int android_ready, video_ready;
+    uint64_t qemu_memory_bytes;
     char image_path[1024], journal_path[1024];
 } MgStatus;
 void mg_config_defaults(MgConfig *);
