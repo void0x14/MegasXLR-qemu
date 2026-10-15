@@ -3,9 +3,11 @@
 import tempfile
 import unittest
 import sys
+import shutil
+import subprocess
 from pathlib import Path
 
-from android_matrix import GateError, VERSIONS, pointer, validate_matrix, check_entry, independent_oracle
+from android_matrix import GateError, VERSIONS, pointer, validate_matrix, check_entry, independent_oracle, verify_decoded_video
 
 
 class MatrixContractTests(unittest.TestCase):
@@ -54,6 +56,22 @@ class MatrixContractTests(unittest.TestCase):
             entry["oracle_id"] = "unmatched"
             with self.assertRaises(GateError):
                 independent_oracle(entry)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "test-only ffmpeg not installed")
+    def test_transport_requires_decodable_real_video(self):
+        source = subprocess.run([
+            "ffmpeg", "-v", "error", "-f", "lavfi",
+            "-i", "testsrc2=size=160x96:rate=10",
+            "-frames:v", "20", "-c:v", "libx264",
+            "-threads", "1", "-preset", "ultrafast",
+            "-tune", "zerolatency", "-g", "5",
+            "-f", "mpegts", "pipe:1",
+        ], capture_output=True)
+        if source.returncode:
+            self.skipTest("test-only libx264 encoder not available")
+        verify_decoded_video(source.stdout)
+        with self.assertRaises(GateError):
+            verify_decoded_video((b"\\x47\\x1f\\xff\\x10" + b"\\xff" * 184) * 128)
 
     def test_no_controller_does_not_pass(self):
         with tempfile.TemporaryDirectory() as directory:
