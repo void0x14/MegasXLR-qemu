@@ -1264,6 +1264,7 @@ cfg->cpus=1;
 cfg->cpu_percent=100;
 cfg->max_threads=48;
 snprintf(cfg->accel,sizeof(cfg->accel),"auto");
+snprintf(cfg->disk_bus,sizeof(cfg->disk_bus),"virtio");
 if(!mgp_env("MEGAS_CGROUP_PARENT",env,sizeof(env)))snprintf(cfg->cgroup_parent,sizeof(cfg->cgroup_parent),"%s",env);
 cfg->passwordless=1;
 
@@ -1757,10 +1758,14 @@ VM_START_FAIL();
           e->cfg.android=jeq(j,token,"true");
       }
       if(config_string(j,"accel",e->cfg.accel,sizeof(e->cfg.accel))||
+         config_string(j,"disk_bus",e->cfg.disk_bus,sizeof(e->cfg.disk_bus))||
          config_string(j,"cgroup_parent",e->cfg.cgroup_parent,sizeof(e->cfg.cgroup_parent))){feedback(e,"Invalid acceleration or delegated resource path.");VM_START_FAIL();}
       if(!strcmp(e->cfg.accel,"auto"))snprintf(e->cfg.accel,sizeof(e->cfg.accel),"%s",mgp_default_accel());
       if(strcmp(e->cfg.accel,"kvm")&&strcmp(e->cfg.accel,"whpx")&&strcmp(e->cfg.accel,"hvf")&&strcmp(e->cfg.accel,"tcg")){
           feedback(e,"Choose auto, kvm, whpx, hvf or explicitly tcg. Accelerators never silently fall back.");VM_START_FAIL();
+      }
+      if(strcmp(e->cfg.disk_bus,"virtio")&&strcmp(e->cfg.disk_bus,"ide")){
+          feedback(e,"Choose virtio or ide for guest disk transport.");VM_START_FAIL();
       }
       if(e->cfg.cpus<1||e->cfg.cpus>4||e->cfg.cpu_percent<1||e->cfg.cpu_percent>400||e->cfg.max_threads<8||e->cfg.max_threads>128){
           feedback(e,"Choose 1-4 vCPUs, CPU budget 1-400 percent of one host CPU and 8-128 host tasks.");VM_START_FAIL();
@@ -1863,7 +1868,7 @@ VM_START_FAIL();
         argv[n++]="-blockdev";
 argv[n++]=disk;
 argv[n++]="-device";
-argv[n++]="virtio-blk-pci,drive=megasdisk";
+argv[n++]=!strcmp(e->cfg.disk_bus,"ide")?"ide-hd,drive=megasdisk":"virtio-blk-pci,drive=megasdisk";
 
     }else e->snapshot_supported=0;
 
@@ -2297,6 +2302,7 @@ bstr(&b,e->status.phase);
     bfmt(&b,",\"guest_pid\":%llu,\"automatic_pending\":%s,\"progress\":",(unsigned long long)e->guest_pid,e->guest_auto_pending?"true":"false");
     bstr(&b,e->guest_progress);
     bput(&b,"}},\"resources\":{\"accel\":");bstr(&b,e->cfg.accel);
+    bput(&b,",\"disk_bus\":");bstr(&b,e->cfg.disk_bus);
     bfmt(&b,",\"vcpus\":%u,\"cpu_percent_of_one_core\":%u,\"max_host_tasks\":%u,\"qemu_threads\":%u,\"qemu_memory_bytes\":%llu,\"hard_task_limit\":%s},",
           e->cfg.cpus,e->cfg.cpu_percent,e->cfg.max_threads,e->status.qemu_threads,
           (unsigned long long)e->status.qemu_memory_bytes,e->process.cgroup[0]?"true":"false");
