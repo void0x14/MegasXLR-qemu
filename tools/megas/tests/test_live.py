@@ -256,7 +256,7 @@ def main():
         if args.workdir:
             Path(args.workdir).mkdir(parents=True, exist_ok=True)
         context = contextlib.nullcontext(args.workdir) if args.workdir else tempfile.TemporaryDirectory(prefix='megas-live-')
-        with context as directory:
+        with context as directory, contextlib.ExitStack() as cleanup:
             runtime = Path(directory)
             raw = runtime / 'guest.raw'
             disk = runtime / 'guest.qcow2'
@@ -269,6 +269,17 @@ def main():
             common = [str(binary), '--runtime', str(runtime), '--port', str(control_port),
                       '--qmp-port', str(qmp_port), '--vnc-port', str(vnc_port)]
             owner_log = (runtime / 'owner.log').open('w')
+            def close_test_owner():
+                if owner and owner.poll() is None:
+                    owner.terminate()
+                    try:
+                        owner.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        owner.kill()
+                        owner.wait(timeout=5)
+                owner_log.close()
+            # Exit before TemporaryDirectory tries deleting open Windows files.
+            cleanup.callback(close_test_owner)
             owner = subprocess.Popen(common + ['serve'], stdout=owner_log, stderr=owner_log)
             token = runtime / f'session-{control_port}.token'
             wait_for(lambda: token.is_file() and token.stat().st_size > 0,
@@ -279,6 +290,15 @@ def main():
                                         capture_output=True, text=True, timeout=20)
                 require(result.stdout.strip(), f'No JSON response: {result.stderr}')
                 response = json.loads(result.stdout)
+                if ok and response.get('ok') is not True:
+                    log_path = runtime / 'qemu-output.log'
+                    if log_path.is_file():
+                        with log_path.open('rb') as log_file:
+                            log_file.seek(0, os.SEEK_END)
+                            log_file.seek(max(0, log_file.tell() - 4096))
+                            tail = log_file.read().decode('utf-8', 'replace')
+                        report.setdefault('diagnostics', {})['qemu_log_tail'] = tail
+                        print('QEMU output: ' + tail, flush=True)
                 if ok:
                     require(response.get('ok') is True, f'Command failed: {request}: {response}')
                 return response
@@ -399,6 +419,22 @@ def main():
                  'params': {'name': 'megas_vm', 'arguments': {'action': 'resize', 'width': 0, 'height': 0}}},
             ]
             packet = ''.join(json.dumps(message) + '\n' for message in messages)
+            default_png = runtime / 'latest.png'
+            png_mtime = default_png.stat().st_mtime_ns if default_png.exists() else None
+            default_run = subprocess.run(common + ['agent'], input=packet,
+                                         capture_output=True, text=True, timeout=10)
+            require(default_run.returncode == 0, f'Default adapter exited: {default_run.stderr}')
+            default_replies = [json.loads(line) for line in default_run.stdout.splitlines()]
+            require(len(default_replies) == 4, 'Default adapter response count invalid')
+            for tool_reply in default_replies[2:]:
+                items = tool_reply['result']['content']
+                state = json.loads(items[0]['text'])
+                require(not state.get('image_path') and all(item['type'] != 'image' for item in items),
+                        'Default agent exported an unsolicited PNG')
+                require(state['ocr']['status'] == 'not_run', 'Default agent started unsolicited OCR')
+            require((default_png.stat().st_mtime_ns if default_png.exists() else None) == png_mtime,
+                    'Default agent rewrote the PNG export')
+            passed('default_agent_does_not_export_images_or_start_ocr')
             ocr_started_at = time.monotonic()
             adapter_ocr_observations = []
             adapter_run_observations = []

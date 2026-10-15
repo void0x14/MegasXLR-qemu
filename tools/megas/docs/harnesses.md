@@ -1,15 +1,9 @@
-> Current default: `megas agent` returns semantic/controller state and livestream
-> discovery without PNG or automatic OCR. `--vision` explicitly enables image
-> results; `--text-only` explicitly selects the older OCR mode. The details below
-> describing default image/OCR behavior predate this default change. Android
-> actions require the local provider described in [android-integration.md](android-integration.md).
-
 # Ajan bağlantısı
 
 Megas VM'i tek bir yerel süreçte yönetir. Ajanlar yeni QEMU süreçleri
-açmak yerine bu sürece komut verir. Her yanıt güncel durum, görsel ve
-okunabilir durum metni taşır; komut başarılı görünse bile ekran ve motor
-durumu ayrıca doğrulanır. Her talebi ayrıntılı günlükte izleyebilirsiniz.
+açmak yerine bu sürece komut verir. Varsayılan yanıt güncel state, canlı yayın
+bağlantı bilgisi ve okunabilir durum metni taşır. PNG ve OCR açık istekle
+çalışır; komutun teslim edilmesi görev başarısı yerine geçmez. Her talebi ayrıntılı günlükte izleyebilirsiniz.
 
 ```sh
 megas gui
@@ -18,19 +12,21 @@ megas send '{"action":"key","key":"Return"}'
 megas agent
 ```
 
-`agent` native C içinde çalışan stdio araç bağlantısıdır. Destekleyen
-harness'e bağlandığında araç sonuçlarında metin ve PNG resim bloğu birlikte
-verilir. Görsel desteği olmayan bağlantı için `megas agent --text-only`
-kullanılır. Ek bir Python, Node veya Rust sunucusu açılmaz. Ayrı açık GUI
+`agent` native C içinde çalışan stdio araç bağlantısıdır. Varsayılan yol
+ekran görüntüsü üretmez ve OCR başlatmaz. İsteğe bağlı PNG sonuçları için
+`megas agent --vision`, eski OCR yolu için açıkça `megas agent --text-only`
+kullanılır. `screenshot` veya `include_image:true` de açık görüntü isteğidir. Ek bir Python, Node veya Rust sunucusu açılmaz. Ayrı açık GUI
 veya `serve` sahibi gerekir; port ve çalışma klasörü ikisinde aynı olmalıdır.
 
 Metin durumu motorun doğruladığı çalışma bilgilerini anlatır. `read_screen`
 eylemi güncel ekran için ayrı bir Tesseract OCR sonucu ister; çıktı OCR olarak
 etiketlenir ve bellek, süre ve metin boyutu sınırlarına tabidir. OCR
 kullanılamıyorsa Megas resimdeki yazıyı tahmin edilmiş metin diye sunmaz.
-Genel amaçlı harness'ler kesintisiz video algısı veya her karede düşünme
-sağlamaz. Sürekli ekran bağlantısı açık kalır; model resmi desteklediği araç
-sonucunda alır. Bu sınırların üzerindeki destek, ilgili harness'in giriş
+Android semantik hedefler ve sürekli kodlanmış yayın için
+[Android bağlantısı](android-integration.md) yerel sağlayıcı gerektirir.
+Genel amaçlı harness'ler yalnızca bir URL metni aldıkları için video izlemez.
+Harness'in yayın girişini ayrıca tüketmesi gerekir; varsayılan yolda modelin
+her kareyi sürekli algıladığı iddia edilmez. Bu sınırların üzerindeki destek, ilgili harness'in giriş
 katmanını değiştirmeyi gerektirir.
 
 ## Otomatik durum ekleme
@@ -43,7 +39,7 @@ klasör varsa `--runtime` ve `--port` seçenekleri `hook` önüne eklenir.
 
 | Uygulama | Entegrasyon ve gerçek kapsam |
 | --- | --- |
-| Claude Code | Proje `.claude/settings.json` dosyasına mevcut ayarları koruyarak Megas `hooks` grupları eklenir. Önce/sonra durum metni model bağlamına girer. Native araç bağlantısı görsel sonuç verir. |
+| Claude Code | Proje `.claude/settings.json` dosyasına mevcut ayarları koruyarak Megas `hooks` grupları eklenir. Önce/sonra durum metni model bağlamına girer. `--vision` ile araç bağlantısı isteğe bağlı görsel sonuç verir. |
 | Codex CLI | Proje `.codex/hooks.json` dosyasında mevcut gruplara eklenir. Codex yeni/değişmiş hook tanımını kendi güven incelemesinden sonra çalıştırır. `/hooks` ekranındaki onay Megas tarafından atlanmaz. Yerel araç çağrıları kapsanır; hosted araçların tamamı kapsanmaz. |
 | OpenCode | `packaging/hooks/opencode.js` proje `.opencode/plugins/` içine konur. `MEGAS_BIN`, isteğe bağlı `MEGAS_RUNTIME` ve `MEGAS_PORT` seçilir. V1 plugin sözleşmesinde araç sonrası sonuca durum ekler, compaction sırasında korur. OpenCode'un zaten kullandığı Bun içinde çalışır; npm paketi indirmez. |
 | Grok Build | Resmî `grok -p` ve `grok agent stdio` arayüzleri bulunur. GUI onarım düğmesi `grok -p` ile isteği gönderip süreç ve çıktıyı gösterir. Bu değişiklik Grok'un her araç olayında bağlama enjeksiyon yaptığını iddia etmez; doğrulanmamış hook şeması üretilmez. |
@@ -82,6 +78,7 @@ entegrasyon o sürüm üzerinde yeniden doğrulanmalıdır.
 - [Grok Build CLI](https://docs.x.ai/build/cli/reference)
 
 Bu değişiklikte gerçek model/harness oturumları için kimlik doğrulama
-yapılmadı. `test_agent.py` native stdio sözleşmesini, metin ve görsel
-yanıtlarını gerçek Megas sahibiyle test eder; sağlayıcıların kurulu
+yapılmadı. `test_agent.py` native stdio sözleşmesini gerçek Megas sahibiyle test eder;
+`test_live.py` varsayılan görüntüsüz yolu ve açık görsel/OCR seçeneklerini
+gerçek QEMU ile denetler; sağlayıcıların kurulu
 harness sürümleri üzerinde canlı uçtan uca testin yerine geçmez.

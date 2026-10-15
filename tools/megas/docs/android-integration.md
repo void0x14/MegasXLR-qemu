@@ -47,7 +47,9 @@ Automatic full RAM/disk checkpoints per input are disabled in Android mode;
 explicit checkpoints remain available when the selected QEMU supports them.
 
 `auto` selects accessible Linux KVM, otherwise single-threaded TCG for ordinary
-VMs. Android mode refuses TCG. Explicit KVM/WHPX/HVF failures never silently
+VMs, with an explicit 32 MiB TCG translation cache. QEMU otherwise sizes
+that cache from host RAM up to 1 GiB and commits it on Windows, which can
+exceed a small VM process budget before startup. Android mode refuses TCG. Explicit KVM/WHPX/HVF failures never silently
 switch to software emulation. Default vCPU count is one; accepted range is 1–4.
 
 On Linux, a pre-delegated cgroup v2 parent is supplied through the local

@@ -1805,7 +1805,7 @@ snprintf(video,sizeof(video),"virtio-vga,xres=%u,yres=%u",e->cfg.width,e->cfg.he
 
     argv[n++]=e->cfg.qemu;
 argv[n++]="-accel";
-snprintf(accel,sizeof(accel),"%s%s",e->cfg.accel,!strcmp(e->cfg.accel,"tcg")?",thread=single":"");
+snprintf(accel,sizeof(accel),"%s%s",e->cfg.accel,!strcmp(e->cfg.accel,"tcg")?",thread=single,tb-size=32":"");
 argv[n++]=accel;
 argv[n++]="-smp";snprintf(smp,sizeof(smp),"%u",e->cfg.cpus);argv[n++]=smp;
 argv[n++]="-m";
