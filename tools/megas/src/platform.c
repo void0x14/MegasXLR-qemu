@@ -512,8 +512,11 @@ static int spawn_process(MgpProcess *process, char *const argv[], const char *lo
         JOBOBJECT_CPU_RATE_CONTROL_INFORMATION cpu;
         memset(&cpu, 0, sizeof(cpu));
         cpu.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
-        cpu.CpuRate = vm->cpu_percent * 100 / GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+        DWORD processors=GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+        if(!processors)processors=1;
+        cpu.CpuRate = vm->cpu_percent * 100 / processors;
         if (!cpu.CpuRate) cpu.CpuRate = 1;
+        if(cpu.CpuRate>10000)cpu.CpuRate=10000;
         if (!SetInformationJobObject(process->job, JobObjectCpuRateControlInformation, &cpu, sizeof(cpu))) {
             TerminateJobObject(process->job, 1);
             WaitForSingleObject(pi.hProcess, 1000);
@@ -661,7 +664,8 @@ int mgp_spawn_vm(MgpProcess *process, char *const argv[], const char *logpath,
         snprintf(value, sizeof(value), "%llu\n", (unsigned long long)limits->memory_bytes);
         if (cgroup_write(process->cgroup, "memory.max", value) ||
             cgroup_write(process->cgroup, "memory.swap.max", "0\n") ||
-            cgroup_write(process->cgroup, "memory.oom.group", "1\n")) goto unavailable;
+            cgroup_write(process->cgroup, "memory.oom.group", "1\n") ||
+            cgroup_write(process->cgroup, "cgroup.kill", "1\n")) goto unavailable;
         snprintf(value, sizeof(value), "%u\n", limits->tasks);
         if (cgroup_write(process->cgroup, "pids.max", value)) goto unavailable;
     } else if (limits->required) goto unavailable;
@@ -723,6 +727,17 @@ int mgp_alive(MgpProcess *process)
     if (process->pid) return 1;
     if (process->group && (!kill(-process->group, 0) || errno == EPERM)) return 1;
     process->group = 0;
+#ifdef __linux__
+    if(process->cgroup[0]){
+        char path[1100],line[128];
+        FILE *file;
+        int populated=0;
+        snprintf(path,sizeof(path),"%s/cgroup.events",process->cgroup);
+        file=mgp_fopen(path,"r");
+        if(file){while(fgets(line,sizeof(line),file))if(sscanf(line,"populated %d",&populated)==1)break;fclose(file);}
+        if(populated)return 1;
+    }
+#endif
     return 0;
 #endif
 }
@@ -837,6 +852,9 @@ void mgp_force_kill(MgpProcess *process)
     if (process->job) TerminateJobObject(process->job, 1);
     else if (mgp_alive(process)) TerminateProcess(process->handle, 1);
 #else
+#ifdef __linux__
+    if(process->cgroup[0]) (void)cgroup_write(process->cgroup,"cgroup.kill","1\n");
+#endif
     if (mgp_alive(process) && process->group) kill(-process->group, SIGKILL);
 #endif
 }

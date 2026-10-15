@@ -36,14 +36,19 @@ class StreamTests(unittest.TestCase):
         self.clients = []
 
     def tearDown(self):
-        for sock in self.clients + [self.control, self.video, self.control_server, self.video_server]:
-            sock.close()
-        self.process.terminate()
+        # TerminateProcess does not deliver SIGTERM to a Windows console app.
+        # Stop through the real fixture control connection on both platforms.
+        try:
+            self.control.sendall(b'{"fixture":"stop"}\n')
+        except OSError:
+            self.process.terminate()
         try:
             out, err = self.process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             self.process.kill()
             out, err = self.process.communicate(timeout=5)
+        for sock in self.clients + [self.control, self.video, self.control_server, self.video_server]:
+            sock.close()
         self.assertEqual(self.process.returncode, 0, err.decode(errors='replace'))
         self.metrics = json.loads(out)
 
