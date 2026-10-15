@@ -71,6 +71,7 @@ int main(void)
     feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":1,\"guest_monotonic_ms\":100,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\",\"set_text\"]},{\"id\":\"n2\",\"operations\":[\"click\"]},{\"id\":\"private_target_marker\",\"operations\":[\"set_text\"]}],\"payload\":{\"private_test_marker\":true}}\n");
     assert(e->android_revision==1);
     assert(!mg_engine_submit(e,"{\"action\":\"android_observe\"}",response,sizeof(response)));
+    assert(strstr(response,"\"state_metrics\"")&&strstr(response,"\"reported_cause_action_id\":0")&&strstr(response,"\"cause_trust\":\"guest_report_not_verified\""));
     assert(strstr(response,"private_test_marker")&&strstr(response,"\"image_path\":\"\""));
     {MgpSocket unauthorized=mgp_connect(cfg.control_port,100);
      const char *request="{\"action\":\"status\",\"auth\":\"wrong\"}\n";
@@ -110,7 +111,8 @@ int main(void)
      assert(mg_live_control_up(e->live));
      peer=accept(control_server,NULL,NULL);assert(peer!=MGP_BAD_SOCKET);}
     feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":3,\"guest_monotonic_ms\":150,\"cause_action_id\":2,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
-    assert(e->android_revision==3);
+    assert(e->android_revision==3&&e->android_revision_gaps>=1);
+    assert(e->android_guest_ms==150);
     feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":2,\"guest_monotonic_ms\":140,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\",\"set_text\"]},{\"id\":\"n2\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
     assert(!e->android_revision);
     puts("android: heartbeat, timeout, no blind replay, explicit uncertainty acknowledgement, stale events invalidate handles");
