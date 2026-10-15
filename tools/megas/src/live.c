@@ -88,6 +88,10 @@ static void viewer_tick(MgLive *s, Viewer *v, uint64_t now)
 {
     int n;
     if (v->socket == MGP_BAD_SOCKET) return;
+    /* The stream must never impersonate a live source after producer stalls. */
+    if (v->streaming == 1 && (!s->last_video || now - s->last_video >= 2000)) {
+        viewer_close(v); return;
+    }
     if (!v->streaming) {
         n = mgp_recv(v->socket, v->request + v->request_used,
                      sizeof(v->request) - v->request_used - 1);
@@ -99,16 +103,19 @@ static void viewer_tick(MgLive *s, Viewer *v, uint64_t now)
                 const char *header;
                 int ok = !strncmp(v->request, "GET /live.ts HTTP/1.", 20) && authorized(s, v->request);
                 if (!ok) header = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                else if (!s->last_video) header = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                else if (!s->last_video || now - s->last_video >= 2000) header = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 else header = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
                 v->used = strlen(header); memcpy(v->output, header, v->used);
-                v->streaming = ok && s->last_video ? 1 : -1;
+                v->streaming = ok && s->last_video && now - s->last_video < 2000 ? 1 : -1;
                 memset(v->request, 0, sizeof(v->request));
             }
         }
         if (!v->streaming && (v->request_used == sizeof(v->request) - 1 || now - v->accepted >= 2000)) {
             viewer_close(v); return;
         }
+    }
+    if (v->streaming == 1 && v->used == v->sent && now - v->progress >= 2000) {
+        viewer_close(v); return;
     }
     if (v->used > v->sent) {
         n = mgp_send(v->socket, v->output + v->sent, v->used - v->sent);
