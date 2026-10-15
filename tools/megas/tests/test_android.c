@@ -118,6 +118,17 @@ int main(void)
     feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":5,\"guest_monotonic_ms\":180,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
     assert(e->android_revision==5&&e->android_revision_gaps>=1);
     assert(e->android_guest_delta_ms==30);
+    {
+        /* Both events arrive in the same socket write. They must be visible
+         * after a single host tick, not after two GUI/agent round trips. */
+        const char *burst="{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":6,\"guest_monotonic_ms\":190,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n"
+            "{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":7,\"guest_monotonic_ms\":200,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n";
+        assert(!mgp_send_all(peer,burst,strlen(burst),100));
+        assert(mgp_ready(e->live->control,0,100)>0);
+        android_tick(e);
+        assert(e->android_revision==7);
+        assert(e->android_guest_ms==200);
+    }
     feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":2,\"guest_monotonic_ms\":140,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\",\"set_text\"]},{\"id\":\"n2\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
     assert(!e->android_revision);
     puts("android: heartbeat, timeout, no blind replay, explicit uncertainty acknowledgement, stale events invalidate handles");
