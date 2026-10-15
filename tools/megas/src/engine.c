@@ -62,6 +62,13 @@ typedef struct { uint64_t step, ms;
  char action[32], before[64], after[64];
  } History;
 
+/* Cached public capabilities; the private accessibility tree stays outside. */
+enum { ANDROID_TARGET_MAX=256 };
+typedef struct {
+    char id[257];
+    unsigned char allowed;
+} MgAndroidTarget;
+
 typedef struct { MgpSocket socket;
  char request[REQUEST_CAP];
  size_t used;
@@ -79,6 +86,8 @@ struct MgEngine {
     MgLive *live;
     char android_state[MG_LIVE_LINE], android_epoch[65];
     char android_outcome[32];
+    MgAndroidTarget android_targets[ANDROID_TARGET_MAX];
+    unsigned android_target_count;
     uint64_t android_revision, android_received, android_generation;
     uint64_t android_action_id, android_pending, android_queued, android_completed;
     uint64_t android_events, android_rejected, resource_sample;
@@ -2138,31 +2147,65 @@ return name;
 /* The private provider owns the tree. The public host only checks immutable
  * per-revision handles and permitted operations announced in its envelope.
  * No coordinates, guessed handles, or private tree schemas are required. */
-static int android_targets(Json *j, const char *target, const char *operation)
+static unsigned android_op_bit(const char *operation)
 {
-    int list=jget(j,0,"targets"),i,count=0,matched=0;
+    static const char *const names[]={
+        "click","long_click","set_text","scroll_forward","scroll_backward","focus"
+    };
+    unsigned i;
+    for(i=0;i<sizeof(names)/sizeof(names[0]);i++)
+        if(!strcmp(operation,names[i]))return 1u<<i;
+    return 0;
+}
+
+/* Compile observed capabilities once per revision. Action dispatch then
+ * avoids reparsing the large guest event or allocating scratch storage. */
+static int android_cache_targets(MgEngine *e, Json *j)
+{
+    int list=jget(j,0,"targets"),i;
+    unsigned count=0;
     if(list<0||j->t[list].type!='[')return -1;
     for(i=list+1;i<j->n&&j->t[i].start<j->t[list].end;i++){
+        MgAndroidTarget *node;
+        unsigned prior;
         int operations,k;
-        char handle[257];
         if(j->t[i].parent!=list)continue;
-        if(j->t[i].type!='{'||
-           jstring(j,jget(j,i,"id"),handle,sizeof(handle))||!handle[0]||
-           ++count>256)return -1;
+        if(j->t[i].type!='{'||count==ANDROID_TARGET_MAX)return -1;
+        node=&e->android_targets[count];
+        if(jstring(j,jget(j,i,"id"),node->id,sizeof(node->id))||
+           !node->id[0])return -1;
+        for(prior=0;prior<count;prior++)
+            if(!strcmp(e->android_targets[prior].id,node->id))return -1;
         operations=jget(j,i,"operations");
         if(operations<0||j->t[operations].type!='[')return -1;
+        node->allowed=0;
         for(k=operations+1;k<j->n&&j->t[k].start<j->t[operations].end;k++){
             char op[32];
+            unsigned bit;
             if(j->t[k].parent!=operations)continue;
-            if(jstring(j,k,op,sizeof(op))||!op[0])return -1;
-            if(target&&!strcmp(handle,target)&&!strcmp(op,operation))matched=1;
+            if(jstring(j,k,op,sizeof(op))||
+               !(bit=android_op_bit(op))||(node->allowed&bit))return -1;
+            node->allowed|=(unsigned char)bit;
         }
+        if(!node->allowed)return -1;
+        count++;
     }
-    return target?matched:1;
+    e->android_target_count=count;
+    return 0;
+}
+static int android_target_allowed(MgEngine *e,const char *id,unsigned operation)
+{
+    unsigned i;
+    for(i=0;i<e->android_target_count;i++)
+        if(!strcmp(e->android_targets[i].id,id))
+            return !!(e->android_targets[i].allowed&operation);
+    return 0;
 }
 static void android_invalidate(MgEngine *e)
 {
     e->android_state[0]=e->android_epoch[0]=0;
+    memset(e->android_targets,0,sizeof(e->android_targets));
+    e->android_target_count=0;
     e->android_revision=e->android_received=0;
     e->android_guest_ms=e->android_guest_delta_ms=e->android_host_delta_ms=0;
     e->android_state_host_ms=e->android_cause_action_id=0;
@@ -2195,10 +2238,11 @@ static int android_tick_one(MgEngine *e)
            juint64(j,jget(j,0,"revision"),&revision)||!revision||
            juint64(j,jget(j,0,"guest_monotonic_ms"),&guest_ms)||
            juint64(j,jget(j,0,"cause_action_id"),&cause)||
-           jget(j,0,"payload")<0||android_targets(j,NULL,NULL)!=1)goto invalid;
+           jget(j,0,"payload")<0)goto invalid;
         if(e->android_epoch[0]&&strcmp(epoch,e->android_epoch))android_invalidate(e);
         if(revision<=e->android_revision||
-           (e->android_revision&&guest_ms<e->android_guest_ms))goto invalid;
+           (e->android_revision&&guest_ms<e->android_guest_ms)||
+           android_cache_targets(e,j))goto invalid;
         if(e->android_revision){
             if(revision-e->android_revision>1)
                 e->android_revision_gaps+=revision-e->android_revision-1;
@@ -2264,16 +2308,10 @@ static int android_act(MgEngine *e,Json *j)
        jstring(j,jget(j,0,"target"),target,sizeof(target))||!target[0]||
        jstring(j,jget(j,0,"operation"),operation,sizeof(operation))||
        config_string(j,"text",text,sizeof(text))){feedback(e,"Choose a provider-issued target and semantic operation; coordinate actions are forbidden.");return -1;}
-    if(strcmp(operation,"click")&&strcmp(operation,"long_click")&&strcmp(operation,"set_text")&&
-       strcmp(operation,"scroll_forward")&&strcmp(operation,"scroll_backward")&&strcmp(operation,"focus")){
-        feedback(e,"Unsupported semantic operation; no input was sent.");return -1;
-    }
     {
-        Json *observed=malloc(sizeof(*observed));
-        int permitted=observed&&!jparse(observed,e->android_state)&&
-                      android_targets(observed,target,operation)==1;
-        free(observed);
-        if(!permitted){
+        unsigned bit=android_op_bit(operation);
+        if(!bit){feedback(e,"Unsupported semantic operation; no input was sent.");return -1;}
+        if(!android_target_allowed(e,target,bit)){
             feedback(e,"Target or operation was not issued by the observed revision. No input was sent.");
             return -1;
         }
