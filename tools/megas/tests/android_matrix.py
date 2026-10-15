@@ -92,6 +92,28 @@ def state(megas, entry):
     return reply, observed
 
 
+def verify_decoded_video(ts_bytes):
+    # Qualification-only FFmpeg decoder. The live host has no FFmpeg worker and
+    # the agent is never served PNG frames from this test.
+    try:
+        result = subprocess.run([
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-f", "mpegts", "-i", "pipe:0", "-map", "0:v:0",
+            "-frames:v", "1", "-progress", "pipe:1", "-f", "null", "-",
+        ], input=ts_bytes, capture_output=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise GateError("test-only video decoder unavailable") from exc
+    frames = []
+    for row in result.stdout.decode("ascii", "replace").splitlines():
+        if row.startswith("frame="):
+            try:
+                frames.append(int(row.split("=", 1)[1].strip()))
+            except ValueError:
+                pass
+    require(result.returncode == 0 and any(value >= 1 for value in frames),
+            "TS packets did not contain an actually decodable video frame")
+
+
 def stream_evidence(entry):
     token_file = Path(entry["runtime_dir"]) / ("session-%d.token" % entry["control_port"])
     try:
@@ -111,8 +133,11 @@ def stream_evidence(entry):
             header, _, body = data.partition(b"\r\n\r\n")
             require(header.startswith(b"HTTP/1.1 200"), "livestream did not return HTTP 200")
             require(b"video/mp2t" in header.lower(), "livestream is not MPEG-TS")
-            while len(body) < 188 * 16 and time.monotonic() < deadline:
-                block = sock.recv(8192)
+            # Observe actual continuous transport, not a single packet or
+            # old cached bytes. Cap both wall time and in-memory evidence.
+            limit = 1024 * 1024
+            while time.monotonic() < deadline and len(body) < limit:
+                block = sock.recv(min(8192, limit - len(body)))
                 require(block, "livestream disconnected before TS evidence")
                 body += block
     except (OSError, UnicodeError) as exc:
@@ -123,6 +148,7 @@ def stream_evidence(entry):
     pids = {((packet[1] & 0x1F) << 8) | packet[2] for packet in packets}
     require(any(pid not in (0, 0x1FFF) for pid in pids),
             "no non-null TS media transport observed")
+    verify_decoded_video(body[:len(packets) * 188])
     return len(packets)
 
 
