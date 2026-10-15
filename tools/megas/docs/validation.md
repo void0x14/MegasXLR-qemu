@@ -227,3 +227,43 @@ and [PR Windows job
 are therefore failures overall; the Windows bundle upload steps were skipped.
 This entry records those exact runs and remains historical if the smoke check
 is later changed and rerun.
+
+## Android task-time acceptance gate
+
+Android agent speed is a release requirement measured against a human doing the
+same task. For every Android task/profile advertised as supported, the agent
+must reach the independently verified goal at the same quality with:
+
+`T_agent(task, profile) <= T_human(task, profile) + 300 seconds`
+
+This is a hard per-scenario gate. Three minutes is not a fixed task limit;
+the allowed completion time is the human reference time plus at most five
+minutes. An aggregate average or percentile cannot hide a scenario that misses
+the bound.
+
+The comparison uses the same task instructions, Android image and API level,
+ABI, VM profile, starting guest state, network access, and success conditions.
+The clock starts when the task is handed to the operator or agent and stops
+only when an independent task-specific oracle verifies the required final
+state and side effects. If VM startup is part of the task, include it in both
+times; otherwise start both from the same ready state. Record the boundary
+before timing begins.
+
+Set the human reference before measuring the agent. For repeated human trials,
+record every successful run and use the median as `T_human`; do not select a
+reference after seeing the agent result. A run passes only when the task oracle
+confirms the same quality and the elapsed-time bound is met. A fast but
+incorrect or incomplete result fails.
+
+Each benchmark record must include task and profile identifiers, Android API,
+image variant, ABI or translation layer, host and VM configuration, starting
+state identifier, human samples and reference time, agent completion time,
+time difference, oracle result, and failure reason. Record observation-to-action
+and action-to-confirmation times as diagnostic breakdowns so slow decisions,
+missing state, and delayed feedback can be located.
+
+A profile cannot be marked supported until every benchmark scenario assigned
+to it passes this gate. A miss means the design or implementation must be
+corrected before support is claimed. The existing BIOS guest timing and
+controller latency checks above do not establish Android task-time compliance;
+no Android human-baseline measurements are present in this validation record.
