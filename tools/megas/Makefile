@@ -74,7 +74,7 @@ test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-l
 else
 test-engine test-guest test-android test-isolation:
 	@echo "SKIP: $@ uses POSIX-only test fixtures and is not run on Windows."
-test: test-rfb test-platform test-seed test-bundle test-live test-agent test-task-budget test-stream
+test: test-rfb test-platform test-seed test-bundle test-live test-agent test-task-budget test-stream test-android-matrix-contract
 endif
 test-bundle:
 	$(PYTHON) tests/test_bundle.py
