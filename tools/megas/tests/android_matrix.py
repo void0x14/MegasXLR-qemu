@@ -55,6 +55,12 @@ def validate_matrix(document):
         require(isinstance(entry.get("postcondition_path"), str) and
                 entry["postcondition_path"].startswith("/"), "postcondition_path required")
         require("postcondition_equals" in entry, "postcondition_equals required")
+        command = entry.get("oracle_cmd")
+        require(isinstance(command, list) and 1 <= len(command) <= 32 and
+                all(isinstance(arg, str) and arg and "\\x00" not in arg for arg in command),
+                "independent oracle_cmd argv is required")
+        require(isinstance(entry.get("oracle_id"), str) and entry["oracle_id"],
+                "independent oracle_id required")
         require(isinstance(entry.get("version_path"), str) and
                 entry["version_path"].startswith("/"), "version_path required")
     return entries
@@ -120,6 +126,20 @@ def stream_evidence(entry):
     return len(packets)
 
 
+def independent_oracle(entry):
+    # This is an external task-specific judge, not an accessibility-state flag,
+    # QEMU log line or Megas client response. It must be provisioned locally.
+    try:
+        process = subprocess.run(entry["oracle_cmd"], capture_output=True, text=True,
+                                 timeout=3, cwd=entry["runtime_dir"])
+        outcome = json.loads(process.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise GateError("independent task oracle unavailable") from exc
+    require(process.returncode == 0 and isinstance(outcome, dict) and
+            outcome.get("oracle_id") == entry["oracle_id"] and
+            outcome.get("passed") is True, "independent task oracle did not pass")
+
+
 def check_entry(megas, entry):
     started = time.monotonic()
     before, observed = state(megas, entry)
@@ -154,6 +174,7 @@ def check_entry(megas, entry):
                 changed["revision"] > observed["revision"] and
                 changed.get("cause_action_id") == action_id and
                 pointer(changed, entry["postcondition_path"]) == entry["postcondition_equals"]):
+            independent_oracle(entry)
             return {"version": entry["version"], "passed": True,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "ts_packets_observed": packets, "revision": changed["revision"]}
