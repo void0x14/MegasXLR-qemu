@@ -2,9 +2,10 @@
 """Contract regressions only; a simulated test cannot certify an Android version."""
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
-from android_matrix import GateError, VERSIONS, pointer, validate_matrix, check_entry
+from android_matrix import GateError, VERSIONS, pointer, validate_matrix, check_entry, independent_oracle
 
 
 class MatrixContractTests(unittest.TestCase):
@@ -43,6 +44,16 @@ class MatrixContractTests(unittest.TestCase):
         self.assertIs(pointer(state, "/payload/ui/dialog/open"), False)
         with self.assertRaises(GateError):
             pointer(state, "/payload/ui/guessed_target")
+
+    def test_independent_oracle_must_return_matching_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            entry = self.entry(Path(directory), 4)
+            entry["oracle_cmd"] = [sys.executable, "-c",
+                "print('{\\\"oracle_id\\\":\\\"external-app-check\\\",\\\"passed\\\":true}')"]
+            independent_oracle(entry)
+            entry["oracle_id"] = "unmatched"
+            with self.assertRaises(GateError):
+                independent_oracle(entry)
 
     def test_no_controller_does_not_pass(self):
         with tempfile.TemporaryDirectory() as directory:
