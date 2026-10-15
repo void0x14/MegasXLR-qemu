@@ -157,10 +157,11 @@ The private JSON is deliberately not committed. It contains a `devices` array
 with **exactly fourteen** objects, with integer `version` from 4 to 17 and
 `runtime_dir`, `control_port`, `stream_port`, provider-issued `target`,
 `operation`, `version_path`, `postcondition_path` and
-`postcondition_equals`. The two paths are JSON pointers into the provider's
+`postcondition_equals`, `oracle_cmd` (a list of local executable arguments), and `oracle_id`.
+The external judge must exit successfully and return JSON `{"oracle_id":"same-id","passed":true}` after the guest-reported state change. It must independently verify the actual app/task outcome rather than trust the guest provider or boot logs. The two paths are JSON pointers into the provider's
 observed state; this public repository neither specifies nor stores the
 private accessibility-tree layout. `set_text` additionally requires `text`.
-An optional `max_seconds` is capped at 180.
+An optional `max_seconds` is capped at 180 including the independent oracle check.
 
 Each real session must provide its own observed Android major-version field,
 current semantic target capability, authenticated continuous MPEG-TS packets,
