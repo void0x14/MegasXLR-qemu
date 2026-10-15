@@ -40,7 +40,7 @@ goldfish/ranchu device model. Suitable locally prepared x86 images can use:
 {"action":"start","android":true,"disk":"/local/android.qcow2","ram_mb":2048,"accel":"kvm","cpus":1,"cpu_percent":100,"max_threads":48}
 ```
 
-The GUI exposes the same Android switch and CPU budget. It does not download an
+The GUI exposes the same Android switch and CPU budget. A storage transport selector uses `virtio` by default or `ide` for legacy x86 images that do not expose virtio block devices. The selected disk transport is passed as an explicit QEMU device, not a post-boot patch. It does not guarantee that a given image contains the required kernel, partition or graphics support. It does not download an
 image or install a provider. There is no Android SDK process in this host path.
 Android skips Linux NoCloud account creation and QGA login-policy retries.
 Automatic full RAM/disk checkpoints per input are disabled in Android mode;
@@ -117,6 +117,8 @@ confirm an unchanged state using `type:heartbeat`, `epoch` and `revision`.
 `guest_monotonic_ms` and cause relationships are provider reports, not host
 clock synchronization or inferred proof of causality. State payloads remain in
 memory and are not written to the action journal.
+
+`android_observe` also reports measured host-to-host state-event intervals, guest-reported monotonic intervals, revision gaps and guest-declared action causes. Host and guest clocks are not synchronized; causes remain provider reports, never independently verified causal evidence. This telemetry is memory-only and never stores private tree contents in the journal.
 
 `android_observe` returns the latest state plus its host freshness, stream
 availability and action status. `android_act` accepts `epoch`,
