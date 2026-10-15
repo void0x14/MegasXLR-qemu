@@ -70,6 +70,10 @@ int main(void)
     memset(ts,0xff,sizeof(ts));ts[0]=0x47;ts[1]=0x1f;ts[2]=0xff;ts[3]=0x10;
     assert(!mgp_send_all(video,ts,sizeof(ts),100));android_tick(e);
     assert(mg_live_video_up(e->live));
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"duplicate\",\"revision\":1,\"guest_monotonic_ms\":5,\"cause_action_id\":0,\"targets\":[{\"id\":\"same\",\"operations\":[\"click\"]},{\"id\":\"same\",\"operations\":[\"set_text\"]}],\"payload\":{}}\n");
+    assert(!e->android_revision && !e->android_target_count);
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"unknown-action\",\"revision\":1,\"guest_monotonic_ms\":5,\"cause_action_id\":0,\"targets\":[{\"id\":\"node\",\"operations\":[\"raw_tap_coordinate\"]}],\"payload\":{}}\n");
+    assert(!e->android_revision && !e->android_target_count);
     feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":1,\"guest_monotonic_ms\":100,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\",\"set_text\"]},{\"id\":\"n2\",\"operations\":[\"click\"]},{\"id\":\"private_target_marker\",\"operations\":[\"set_text\"]}],\"payload\":{\"private_test_marker\":true}}\n");
     assert(e->android_revision==1);
     assert(!mg_engine_submit(e,"{\"action\":\"android_observe\"}",response,sizeof(response)));
