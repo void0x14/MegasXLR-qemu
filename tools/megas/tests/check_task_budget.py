@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Enforce the Android task-time acceptance gate from a benchmark JSON report."""
 
 import argparse
@@ -13,6 +13,14 @@ from datetime import datetime
 
 LIMIT_SECONDS = 300.0
 ANDROID_API_LEVELS = set(range(14, 38))
+APP_ABIS_32_BIT = {"armeabi-v7a", "x86"}
+APP_ABIS_64_BIT = {"arm64-v8a", "x86_64"}
+ABI_FAMILY = {
+    "armeabi-v7a": "arm",
+    "arm64-v8a": "arm",
+    "x86": "x86",
+    "x86_64": "x86",
+}
 
 
 def _text(value):
@@ -103,9 +111,33 @@ def validate_report(report):
     for api in sorted(ANDROID_API_LEVELS - covered_apis):
         errors.append(f"support_matrix does not cover Android API {api}")
 
+    covered_app_abis = set()
+    native_app_abis = set()
+    for scenario_id, scenario in scenarios.items():
+        if scenario_id not in expected:
+            continue
+        api = scenario.get("android_api")
+        app_abi = scenario.get("app_abi")
+        if type(api) is int and isinstance(app_abi, str) and app_abi in ABI_FAMILY:
+            covered_app_abis.add((api, app_abi))
+            if (scenario.get("guest_abi") == app_abi and
+                    scenario.get("translation_layer") == "none"):
+                native_app_abis.add((api, app_abi))
+    for api in sorted(ANDROID_API_LEVELS):
+        required_abis = APP_ABIS_32_BIT | (APP_ABIS_64_BIT if api >= 21 else set())
+        for app_abi in sorted(required_abis):
+            if (api, app_abi) not in covered_app_abis:
+                errors.append(
+                    f"support_matrix does not cover app ABI {app_abi} on Android API {api}"
+                )
+            if (api, app_abi) not in native_app_abis:
+                errors.append(
+                    f"support_matrix has no native guest run for app ABI {app_abi} on Android API {api}"
+                )
+
     required_text = (
-        "task_id", "profile_id", "image_variant", "abi", "starting_state_id",
-        "task_digest", "oracle_id",
+        "task_id", "profile_id", "image_variant", "guest_abi", "app_abi",
+        "translation_layer", "starting_state_id", "task_digest", "oracle_id",
     )
     for scenario_id in sorted(set(expected) & set(scenarios)):
         scenario = scenarios[scenario_id]
@@ -115,6 +147,20 @@ def validate_report(report):
         for field in required_text:
             if not _text(scenario.get(field)):
                 scenario_errors.append(field + " is required")
+        if not isinstance(scenario.get("guest_abi"), str) or scenario.get("guest_abi") not in ABI_FAMILY:
+            scenario_errors.append("guest_abi must name a supported Android ABI")
+        if not isinstance(scenario.get("app_abi"), str) or scenario.get("app_abi") not in ABI_FAMILY:
+            scenario_errors.append("app_abi must name a supported Android ABI")
+        guest_abi = scenario.get("guest_abi")
+        app_abi = scenario.get("app_abi")
+        translation_layer = scenario.get("translation_layer")
+        if (isinstance(guest_abi, str) and guest_abi in ABI_FAMILY
+                and isinstance(app_abi, str) and app_abi in ABI_FAMILY
+                and ABI_FAMILY[guest_abi] != ABI_FAMILY[app_abi]
+                and translation_layer == "none"):
+            scenario_errors.append(
+                "guest_abi and app_abi differ by CPU family but no translation_layer is recorded"
+            )
         api = scenario.get("android_api")
         if type(api) is not int or not 14 <= api <= 37:
             scenario_errors.append("android_api must be an integer from 14 through 37")
