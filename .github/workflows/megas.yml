@@ -1,0 +1,286 @@
+name: Megas native controller
+on:
+  push:
+    paths: ['tools/megas/**', '.github/workflows/megas.yml']
+  pull_request:
+    paths: ['tools/megas/**', '.github/workflows/megas.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: megas-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Install build-runner dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential libx11-dev qemu-system-x86 qemu-utils tesseract-ocr xvfb
+      - name: Record imported distribution QEMU runtime
+        run: |
+          qemu-system-x86_64 --version
+          qemu-img --version
+          tesseract --version
+          dpkg-query -W qemu-system-x86 qemu-utils
+      - name: Build native and headless controllers
+        run: make -C tools/megas all headless
+      - name: Run native protocol and real QEMU checks
+        id: native-tests
+        run: make -C tools/megas test
+      - name: Preserve Linux QEMU test diagnostics
+        if: failure() && steps.native-tests.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-linux-live-test-diagnostics
+          path: tools/megas/build/live-report.json
+          if-no-files-found: ignore
+      - name: Build complete private-runtime bundle
+        run: make -C tools/megas bundle
+      - name: Extract and smoke-test the private Linux bundle
+        id: bundle-smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/megas-bundle-smoke"
+          rm -rf -- "$root"
+          mkdir -p "$root/extracted" "$root/work" "$root/home" "$root/tmp"
+          log="$root/smoke.log"
+          : > "$log"
+          bundle="$root/extracted/bundle"
+          tar -xzf tools/megas/build/bundle.tar.gz -C "$root/extracted"
+          (cd "$bundle" && sha256sum --quiet -c SHA256SUMS) >> "$log" 2>&1 || { cat "$log"; exit 1; }
+          run_logged() {
+            printf '\n$' >> "$log"
+            printf ' %q' "$@" >> "$log"
+            printf '\n' >> "$log"
+            if "$@" >> "$log" 2>&1; then return 0; else result=$?; cat "$log"; return "$result"; fi
+          }
+          clean_env=(env -u LD_LIBRARY_PATH -u QEMU_MODULE_DIR -u MEGAS_TESSERACT -u TESSDATA_PREFIX -u MEGAS_QEMU -u MEGAS_QEMU_IMG -u MEGAS_QEMU_DATA_DIR -u MEGAS_PACKAGE_DIR)
+          cd "$root/work"
+          run_logged "${clean_env[@]}" "PATH=$bundle/qemu/bin:$bundle/ocr:/usr/bin:/bin" "$bundle/megas-headless" --help
+          run_logged "${clean_env[@]}" "PATH=$bundle/qemu/bin:$bundle/ocr:/usr/bin:/bin" "$bundle/qemu/bin/qemu-system-x86_64" --version
+          run_logged "${clean_env[@]}" "PATH=$bundle/qemu/bin:$bundle/ocr:/usr/bin:/bin" "$bundle/qemu/bin/qemu-img" --version
+          run_logged "${clean_env[@]}" "PATH=$bundle/qemu/bin:$bundle/ocr:/usr/bin:/bin" "TESSDATA_PREFIX=$bundle/ocr/tessdata" "$bundle/ocr/tesseract" --list-langs
+          grep -Fq 'megas [options] agent' "$log"
+          grep -Fxq 'eng' "$log"
+          install="$root/home/megas"
+          run_logged env HOME="$root/home" XDG_DATA_HOME="$root/data" XDG_STATE_HOME="$root/state" TMPDIR="$root/tmp" "$bundle/packaging/install.sh" --agent --desktop-icon=no "--prefix=$install"
+          test -f "$root/data/applications/megas.desktop"
+          test ! -e "$root/home/Desktop/megas.desktop"
+          run_logged "${clean_env[@]}" "PATH=$install/qemu/bin:$install/ocr:/usr/bin:/bin" "$install/megas-headless" --help
+          run_logged "${clean_env[@]}" "PATH=$install/qemu/bin:$install/ocr:/usr/bin:/bin" "$install/qemu/bin/qemu-system-x86_64" --version
+          run_logged "${clean_env[@]}" "PATH=$install/qemu/bin:$install/ocr:/usr/bin:/bin" "TESSDATA_PREFIX=$install/ocr/tessdata" "$install/ocr/tesseract" --list-langs
+          grep -Fxq 'eng' "$log"
+          cat "$log"
+      - name: Preserve Linux bundle smoke diagnostics
+        if: failure() && steps.bundle-smoke.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-linux-bundle-smoke-diagnostics
+          path: ${{ runner.temp }}/megas-bundle-smoke/smoke.log
+          if-no-files-found: ignore
+      - name: Upload tested Linux bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-linux-x86_64
+          path: |
+            tools/megas/build/bundle.tar.gz
+            tools/megas/build/bundle.tar.gz.sha256
+          if-no-files-found: error
+  windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Prepare native Windows build runner
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-qemu
+            mingw-w64-ucrt-x86_64-tesseract-ocr
+            mingw-w64-ucrt-x86_64-tesseract-data-eng
+      - name: Build native Windows executables
+        run: make -C tools/megas CC=gcc all headless
+      - name: Record imported MSYS2 QEMU runtime
+        run: |
+          qemu-system-x86_64 --version
+          qemu-img --version
+          tesseract --version
+          pacman -Qi mingw-w64-ucrt-x86_64-qemu
+          pacman -Qi mingw-w64-ucrt-x86_64-tesseract-ocr mingw-w64-ucrt-x86_64-tesseract-data-eng
+      - name: Run Windows adapter, ISO and real QEMU checks
+        id: native-tests
+        run: make -C tools/megas CC=gcc test
+      - name: Preserve Windows QEMU test diagnostics
+        if: failure() && steps.native-tests.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-windows-live-test-diagnostics
+          path: tools/megas/build/live-report.json
+          if-no-files-found: ignore
+      - name: Build complete Windows bundle
+        run: make -C tools/megas CC=gcc bundle
+      - name: Extract and smoke-test the private Windows bundle
+        id: bundle-smoke
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'megas-bundle-smoke'
+          if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          $extracted = Join-Path $root 'extracted'
+          $work = Join-Path $root 'work'
+          New-Item -ItemType Directory -Force -Path $extracted, $work | Out-Null
+          $log = Join-Path $root 'smoke.log'
+          New-Item -ItemType File -Path $log | Out-Null
+          $destination = Join-Path $root 'installed\Megas'
+          $menuShortcut = $null
+          $guiProcess = $null
+          $guiOutput = Join-Path $root 'gui.stdout.log'
+          $guiError = Join-Path $root 'gui.stderr.log'
+          try {
+            $archive = Join-Path $env:GITHUB_WORKSPACE 'tools\megas\build\bundle.zip'
+            Add-Content -LiteralPath $log -Value "> Expand-Archive $archive"
+            Expand-Archive -LiteralPath $archive -DestinationPath $extracted
+            $bundle = Join-Path $extracted 'bundle'
+            $systemPath = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+            $env:PATH = "$bundle\qemu\bin;$bundle\ocr;$systemPath"
+            Remove-Item Env:MSYSTEM -ErrorAction SilentlyContinue
+            Remove-Item Env:MSYSTEM_PREFIX -ErrorAction SilentlyContinue
+            Remove-Item Env:MINGW_PREFIX -ErrorAction SilentlyContinue
+            Set-Location $work
+            function Invoke-Smoke([string]$Executable, [string[]]$Arguments) {
+              Add-Content -LiteralPath $log -Value ("> " + $Executable + ' ' + ($Arguments -join ' '))
+              $output = & $Executable @Arguments 2>&1
+              $exitCode = $LASTEXITCODE
+              if ($null -ne $output) { $output | Out-String | Add-Content -LiteralPath $log }
+              if ($exitCode -ne 0) { throw "Private bundle command failed ($exitCode): $Executable" }
+            }
+            $localAppData = Join-Path $root 'localappdata'
+            New-Item -ItemType Directory -Force -Path $localAppData | Out-Null
+            $env:LOCALAPPDATA = $localAppData
+            $installer = Join-Path $bundle 'packaging\install.ps1'
+            $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            Invoke-Smoke $powershell @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-Agent', '-DesktopIcon', 'No', '-Destination', $destination)
+            if (-not (Test-Path -LiteralPath (Join-Path $destination '.megas-install'))) { throw 'Isolated Windows install did not create its management marker' }
+            $programs = [Environment]::GetFolderPath('Programs')
+            $menuShortcut = Join-Path $programs 'Megas.lnk'
+            if (-not (Test-Path -LiteralPath $menuShortcut)) { throw 'Windows application-menu shortcut missing after install' }
+            $shell = New-Object -ComObject WScript.Shell
+            $shortcut = $shell.CreateShortcut($menuShortcut)
+            try {
+              if ($shortcut.TargetPath -ne (Join-Path $destination 'megas.exe')) { throw 'Windows shortcut target does not match isolated install' }
+            } finally {
+              [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut)
+              [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+            }
+            $desktopShortcut = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Megas.lnk'
+            if (Test-Path -LiteralPath $desktopShortcut) { throw 'DesktopIcon No created a desktop shortcut' }
+            $env:PATH = "$destination\qemu\bin;$destination\ocr;$systemPath"
+            $env:MEGAS_TESSERACT = Join-Path $destination 'ocr\tesseract.exe'
+            $env:TESSDATA_PREFIX = Join-Path $destination 'ocr\tessdata'
+            $env:MEGAS_PACKAGE_DIR = $destination
+            $env:MEGAS_QEMU = Join-Path $destination 'qemu\bin\qemu-system-x86_64.exe'
+            $env:MEGAS_QEMU_IMG = Join-Path $destination 'qemu\bin\qemu-img.exe'
+            $env:MEGAS_QEMU_DATA_DIR = Join-Path $destination 'qemu\share\qemu'
+            $env:QEMU_MODULE_DIR = Join-Path $destination 'qemu\lib\qemu'
+            Invoke-Smoke (Join-Path $destination 'megas-headless.exe') @('--help')
+            Invoke-Smoke $env:MEGAS_QEMU @('--version')
+            Invoke-Smoke $env:MEGAS_QEMU_IMG @('--version')
+            Invoke-Smoke $env:MEGAS_TESSERACT @('--version')
+            Invoke-Smoke (Join-Path $destination 'ocr\tesseract.exe') @('--list-langs')
+            if (-not (Select-String -LiteralPath $log -Pattern '^eng$' -Quiet)) { throw 'Installed Tesseract could not read eng.traineddata' }
+            $guiExecutable = Join-Path $destination 'megas.exe'
+            $guiRuntime = Join-Path $root 'gui-runtime'
+            New-Item -ItemType Directory -Force -Path $guiRuntime | Out-Null
+            $guiArguments = @('--runtime', ('"{0}"' -f $guiRuntime), 'gui')
+            Add-Content -LiteralPath $log -Value ("> GUI launch: " + $guiExecutable + ' ' + ($guiArguments -join ' '))
+            $guiProcess = Start-Process -FilePath $guiExecutable -ArgumentList $guiArguments -PassThru -WorkingDirectory $work -WindowStyle Normal -RedirectStandardOutput $guiOutput -RedirectStandardError $guiError
+            $guiProcessHandle = $guiProcess.Handle
+            if ($guiProcessHandle -eq [IntPtr]::Zero) { throw 'Could not retain a native process handle for the packaged GUI' }
+            Add-Content -LiteralPath $log -Value ("GUI PID: " + $guiProcess.Id)
+            Add-Content -LiteralPath $log -Value ("GUI process handle retained: 0x{0:X}" -f $guiProcessHandle.ToInt64())
+            $windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+              $guiProcess.Refresh()
+              if ($guiProcess.HasExited) { throw ("GUI process " + $guiProcess.Id + " exited before creating a main window (exit " + $guiProcess.ExitCode + ')') }
+              if ($guiProcess.MainWindowHandle -ne [IntPtr]::Zero) { break }
+              Start-Sleep -Milliseconds 200
+            } while ([DateTime]::UtcNow -lt $windowDeadline)
+            $guiProcess.Refresh()
+            if ($guiProcess.HasExited) { throw ("GUI process " + $guiProcess.Id + " exited before creating a main window (exit " + $guiProcess.ExitCode + ')') }
+            $windowHandle = $guiProcess.MainWindowHandle
+            if ($windowHandle -eq [IntPtr]::Zero) { throw 'Packaged GUI did not create a native main window within 30 seconds' }
+            $workingSet = $guiProcess.WorkingSet64
+            Add-Content -LiteralPath $log -Value ("GUI main window: 0x{0:X}; title: {1}" -f $windowHandle.ToInt64(), $guiProcess.MainWindowTitle)
+            Add-Content -LiteralPath $log -Value ("GUI working set: {0:N1} MiB ({1} bytes)" -f ($workingSet / 1MB), $workingSet)
+            if ($workingSet -ge (100 * 1024 * 1024)) { throw ("Packaged GUI working set exceeded 100 MiB: " + $workingSet + ' bytes') }
+            if (-not $guiProcess.CloseMainWindow()) { throw 'Could not request a normal close of the packaged GUI main window' }
+            if (-not $guiProcess.WaitForExit(10000)) { throw 'Packaged GUI did not exit within 10 seconds after CloseMainWindow' }
+            if (-not $guiProcess.HasExited) { throw 'Packaged GUI wait completed without confirming process exit' }
+            $guiExitCode = $guiProcess.ExitCode
+            if ($null -eq $guiExitCode) { throw 'Packaged GUI exit code was unavailable after process exit' }
+            if ($guiExitCode -ne 0) { throw ("Packaged GUI exited with code " + $guiExitCode + ' after a normal window close') }
+            Add-Content -LiteralPath $log -Value ("GUI exited after normal window close; PID " + $guiProcess.Id + '; exit code 0')
+          } catch {
+            Add-Content -LiteralPath $log -Value $_
+            throw
+          } finally {
+            if ($guiProcess) {
+              try {
+                if (-not $guiProcess.HasExited) {
+                  Add-Content -LiteralPath $log -Value ("GUI cleanup: force-terminating PID " + $guiProcess.Id + ' after smoke failure')
+                  Stop-Process -Id $guiProcess.Id -Force -ErrorAction SilentlyContinue
+                  [void]$guiProcess.WaitForExit(5000)
+                }
+              } catch {
+                Add-Content -LiteralPath $log -Value ("GUI cleanup error: " + $_)
+              } finally {
+                $guiProcess.Dispose()
+              }
+            }
+            foreach ($outputPath in @($guiOutput, $guiError)) {
+              if (Test-Path -LiteralPath $outputPath) {
+                $outputText = Get-Content -LiteralPath $outputPath -Raw
+                if ($outputText) {
+                  Add-Content -LiteralPath $log -Value ("--- " + (Split-Path -Leaf $outputPath) + ' ---')
+                  Add-Content -LiteralPath $log -Value $outputText
+                }
+              }
+            }
+            Write-Host (Get-Content -LiteralPath $log -Raw)
+            if ($menuShortcut -and (Test-Path -LiteralPath $menuShortcut)) { Remove-Item -LiteralPath $menuShortcut -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath (Split-Path -Parent $destination)) { Remove-Item -LiteralPath (Split-Path -Parent $destination) -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+      - name: Preserve Windows bundle smoke diagnostics
+        if: failure() && steps.bundle-smoke.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-windows-bundle-smoke-diagnostics
+          path: ${{ runner.temp }}/megas-bundle-smoke/smoke.log
+          if-no-files-found: ignore
+      - name: Parse native installer scripts
+        shell: powershell
+        run: |
+          $files = @('tools/megas/packaging/install.ps1', 'tools/megas/packaging/bootstrap.ps1.in', 'tools/megas/guest/windows-policy.ps1')
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+          }
+      - name: Upload tested Windows bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: megas-windows-x86_64
+          path: |
+            tools/megas/build/bundle.zip
+            tools/megas/build/bundle.zip.sha256
+          if-no-files-found: error
