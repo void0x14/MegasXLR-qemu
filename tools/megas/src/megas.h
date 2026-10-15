@@ -15,7 +15,7 @@ typedef struct {
     unsigned qmp_port, vnc_port, control_port;
     unsigned qga_port;
     unsigned android_port, video_port, stream_port, cpus, cpu_percent, max_threads;
-    char accel[16], cgroup_parent[1024];
+    char accel[16], disk_bus[16], cgroup_parent[1024];
     int android;
     int passwordless;
 } MgConfig;
