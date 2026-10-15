@@ -2127,6 +2127,32 @@ for(i=0;aliases[i].from;i++)if(!strcmp(name,aliases[i].from))return aliases[i].t
 return name;
 
 }
+
+/* The private provider owns the tree. The public host only checks immutable
+ * per-revision handles and permitted operations announced in its envelope.
+ * No coordinates, guessed handles, or private tree schemas are required. */
+static int android_targets(Json *j, const char *target, const char *operation)
+{
+    int list=jget(j,0,"targets"),i,count=0,matched=0;
+    if(list<0||j->t[list].type!='[')return -1;
+    for(i=list+1;i<j->n&&j->t[i].start<j->t[list].end;i++){
+        int operations,k;
+        char handle[257];
+        if(j->t[i].parent!=list)continue;
+        if(j->t[i].type!='{'||
+           jstring(j,jget(j,i,"id"),handle,sizeof(handle))||!handle[0]||
+           ++count>256)return -1;
+        operations=jget(j,i,"operations");
+        if(operations<0||j->t[operations].type!='[')return -1;
+        for(k=operations+1;k<j->n&&j->t[k].start<j->t[operations].end;k++){
+            char op[32];
+            if(j->t[k].parent!=operations)continue;
+            if(jstring(j,k,op,sizeof(op))||!op[0])return -1;
+            if(target&&!strcmp(handle,target)&&!strcmp(op,operation))matched=1;
+        }
+    }
+    return target?matched:1;
+}
 static void android_invalidate(MgEngine *e)
 {
     e->android_state[0]=e->android_epoch[0]=0;
@@ -2160,7 +2186,7 @@ static void android_tick(MgEngine *e)
            juint64(j,jget(j,0,"revision"),&revision)||!revision||
            juint64(j,jget(j,0,"guest_monotonic_ms"),&guest_ms)||
            juint64(j,jget(j,0,"cause_action_id"),&cause)||
-           jget(j,0,"payload")<0)goto invalid;
+           jget(j,0,"payload")<0||android_targets(j,NULL,NULL)!=1)goto invalid;
         if(e->android_epoch[0]&&strcmp(epoch,e->android_epoch))android_invalidate(e);
         if(revision<=e->android_revision)goto invalid;
         snprintf(e->android_epoch,sizeof(e->android_epoch),"%s",epoch);
@@ -2208,6 +2234,16 @@ static int android_act(MgEngine *e,Json *j)
     if(strcmp(operation,"click")&&strcmp(operation,"long_click")&&strcmp(operation,"set_text")&&
        strcmp(operation,"scroll_forward")&&strcmp(operation,"scroll_backward")&&strcmp(operation,"focus")){
         feedback(e,"Unsupported semantic operation; no input was sent.");return -1;
+    }
+    {
+        Json *observed=malloc(sizeof(*observed));
+        int permitted=observed&&!jparse(observed,e->android_state)&&
+                      android_targets(observed,target,operation)==1;
+        free(observed);
+        if(!permitted){
+            feedback(e,"Target or operation was not issued by the observed revision. No input was sent.");
+            return -1;
+        }
     }
     binit(&b,wire,sizeof(wire));
     bfmt(&b,"{\"type\":\"action\",\"id\":%llu,\"expected_revision\":%llu,\"epoch\":",
