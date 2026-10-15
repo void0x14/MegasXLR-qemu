@@ -41,7 +41,8 @@ def validate_matrix(document):
             "matrix requires devices list")
     entries = document["devices"]
     versions = [entry.get("version") for entry in entries if isinstance(entry, dict)]
-    require(len(entries) == 14 and set(versions) == VERSIONS and len(versions) == len(set(versions)),
+    require(len(entries) == 14 and all(type(v) is int for v in versions) and
+            set(versions) == VERSIONS and len(versions) == len(set(versions)),
             "matrix requires exactly one entry per Android major release 4 through 17")
     for entry in entries:
         require(isinstance(entry.get("runtime_dir"), str) and
