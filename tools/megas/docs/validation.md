@@ -234,12 +234,13 @@ Android agent speed is a release requirement measured against a human doing the
 same task. For every Android task/profile advertised as supported, the agent
 must reach the independently verified goal at the same quality with:
 
-`T_agent(task, profile) <= T_human(task, profile) + 300 seconds`
+`T_agent(task, profile) <= min(180 seconds, T_human(task, profile) + 300 seconds)`
 
-This is a hard per-scenario gate. Three minutes is not a fixed task limit;
-the allowed completion time is the human reference time plus at most five
-minutes. An aggregate average or percentile cannot hide a scenario that misses
-the bound.
+Both the three-minute absolute cap and the five-minute relative overhead cap
+are enforced independently for every reported run. A run must also match its
+wall-clock UTC start/end timestamps within one second and pass the independent
+task oracle. An aggregate average or percentile cannot hide a scenario that
+misses either bound.
 
 The comparison uses the same task instructions, Android image and API level,
 ABI, VM profile, starting guest state, network access, and success conditions.
