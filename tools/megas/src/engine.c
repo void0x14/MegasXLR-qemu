@@ -82,6 +82,8 @@ struct MgEngine {
     uint64_t android_revision, android_received, android_generation;
     uint64_t android_action_id, android_pending, android_queued, android_completed;
     uint64_t android_events, android_rejected, resource_sample;
+    uint64_t android_guest_ms, android_guest_delta_ms, android_host_delta_ms;
+    uint64_t android_state_host_ms, android_cause_action_id, android_revision_gaps;
     int android_uncertain, include_image;
 
     MgpSocket qmp, listener;
@@ -2157,6 +2159,8 @@ static void android_invalidate(MgEngine *e)
 {
     e->android_state[0]=e->android_epoch[0]=0;
     e->android_revision=e->android_received=0;
+    e->android_guest_ms=e->android_guest_delta_ms=e->android_host_delta_ms=0;
+    e->android_state_host_ms=e->android_cause_action_id=0;
     if(e->android_pending){e->android_uncertain=1;snprintf(e->android_outcome,sizeof(e->android_outcome),"uncertain");}
 }
 static void android_tick(MgEngine *e)
@@ -2188,10 +2192,22 @@ static void android_tick(MgEngine *e)
            juint64(j,jget(j,0,"cause_action_id"),&cause)||
            jget(j,0,"payload")<0||android_targets(j,NULL,NULL)!=1)goto invalid;
         if(e->android_epoch[0]&&strcmp(epoch,e->android_epoch))android_invalidate(e);
-        if(revision<=e->android_revision)goto invalid;
+        if(revision<=e->android_revision||
+           (e->android_revision&&guest_ms<e->android_guest_ms))goto invalid;
+        if(e->android_revision){
+            if(revision-e->android_revision>1)
+                e->android_revision_gaps+=revision-e->android_revision-1;
+            e->android_guest_delta_ms=guest_ms-e->android_guest_ms;
+            e->android_host_delta_ms=mgp_now()-e->android_state_host_ms;
+        }else{
+            e->android_guest_delta_ms=e->android_host_delta_ms=0;
+        }
         snprintf(e->android_epoch,sizeof(e->android_epoch),"%s",epoch);
         snprintf(e->android_state,sizeof(e->android_state),"%s",line);
-        e->android_revision=revision;e->android_received=mgp_now();e->android_events++;
+        e->android_guest_ms=guest_ms;e->android_cause_action_id=cause;
+        e->android_revision=revision;
+        e->android_received=e->android_state_host_ms=mgp_now();
+        e->android_events++;
         /* Private provider payloads are memory-only: never persist trees or text. */
     }else if(!strcmp(type,"heartbeat")){
         if(jstring(j,jget(j,0,"epoch"),epoch,sizeof(epoch))||strcmp(epoch,e->android_epoch)||
@@ -2294,6 +2310,14 @@ bstr(&b,e->status.phase);
           (unsigned long long)e->android_queued,(unsigned long long)e->android_completed,
           (unsigned long long)(e->android_completed?e->android_completed-e->android_queued:0));
     bput(&b,e->android_state[0]?e->android_state:"null");
+    bfmt(&b,",\"state_metrics\":{\"revision\":%llu,\"guest_monotonic_ms\":%llu,\"guest_delta_ms\":%llu,\"host_received_monotonic_ms\":%llu,\"host_delta_ms\":%llu,\"reported_cause_action_id\":%llu,\"revision_gaps_total\":%llu,\"cause_trust\":\"guest_report_not_verified\"}",
+          (unsigned long long)e->android_revision,
+          (unsigned long long)e->android_guest_ms,
+          (unsigned long long)e->android_guest_delta_ms,
+          (unsigned long long)e->android_state_host_ms,
+          (unsigned long long)e->android_host_delta_ms,
+          (unsigned long long)e->android_cause_action_id,
+          (unsigned long long)e->android_revision_gaps);
     bfmt(&b,"},\"livestream\":{\"available\":%s,\"transport\":\"mpegts-http\",\"url\":\"http://127.0.0.1:%u/live.ts\",\"authorization\":\"Bearer session credential; never put it in a URL\",\"bytes_relayed\":%llu,\"source_age_ms\":%llu,\"slow_clients_disconnected\":%llu},\"ocr\":{\"status\":",
           mg_live_video_up(e->live)?"true":"false",e->cfg.stream_port,
           (unsigned long long)mg_live_bytes(e->live),(unsigned long long)mg_live_video_age(e->live),
