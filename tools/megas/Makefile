@@ -27,7 +27,7 @@ GUI_LIBS = -lX11 -lm
 CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 endif
 
-.PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle bundle
+.PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle test-task-budget bundle
 all: $(BUILD)/megas$(EXE)
 headless: $(BUILD)/megas-headless$(EXE)
 $(BUILD):
