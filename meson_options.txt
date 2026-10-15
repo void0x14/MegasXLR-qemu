@@ -181,7 +181,7 @@ option('iconv', type : 'feature', value : 'auto',
 option('curses', type : 'feature', value : 'auto',
        description: 'curses UI')
 option('megas_stream', type : 'feature', value : 'auto',
-       description: 'Megas native H.264/MPEG-TS software display')
+       description: 'Megas DMA-BUF hardware H.264/MPEG-TS display')
 option('libcbor', type : 'feature', value : 'auto',
        description: 'libcbor support')
 option('gnutls', type : 'feature', value : 'auto',

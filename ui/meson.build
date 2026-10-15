@@ -96,8 +96,8 @@ ui_modules = {}
 
 if have_megas_stream
   megas_ss = ss.source_set()
-  megas_ss.add(pixman, megas_x264, megas_yuv,
-               files('megas.c', 'megas-video.c'))
+  megas_ss.add(opengl, gbm, megas_avcodec, megas_avfilter, megas_avutil, megas_drm,
+               files('megas.c', 'megas-video.c', 'megas-mpegts.c'))
   ui_modules += {'megas': megas_ss}
 endif
 

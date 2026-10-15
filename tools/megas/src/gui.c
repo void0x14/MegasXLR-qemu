@@ -50,14 +50,15 @@ typedef struct {
     int android, cpus, cpu_percent;
     float row;
     char qemu[1024], disk[1024], iso[1024], checkpoint[64];
+    char rendernode[1024];
     char username[128], password[256];
     struct nk_rect password_bounds;
     char new_disk[1024];
     char feedback[2048], repair[8192], repair_file[1200];
     char pending[8192], response[65536], history[24576];
     char seen_feedback[512];
-    struct nk_text_edit editors[8];
-    char editor_memory[8][1024], editor_shadow[8][1024];
+    struct nk_text_edit editors[9];
+    char editor_memory[9][1024], editor_shadow[9][1024];
     unsigned editor_ready;
     char checkpoints[GUI_MAX_CHECKPOINTS][64];
     int checkpoint_count;
@@ -182,7 +183,7 @@ static void gui_named(MgGui *ui, const char *action, const char *name)
 
 static void gui_start(MgGui *ui)
 {
-    char qemu[6144], disk[6144], iso[6144], username[768], password[1536], request[22000];
+    char qemu[6144], disk[6144], iso[6144], username[768], password[1536], request[22000], rendernode[768];
     const MgStatus *status = mg_engine_status(ui->engine);
     if (!ui->android && !ui->passwordless && !ui->password[0] && !status->owned_pid) {
         gui_note(ui, tr("Yeni VM için şifresiz oturumu seçin veya yeni bir misafir şifresi girin.",
@@ -203,9 +204,12 @@ static void gui_start(MgGui *ui)
         return;
     }
     if(ui->android){
+        if(!json_string(rendernode,sizeof(rendernode),ui->rendernode)){
+            gui_note(ui,tr("GPU aygıt yolu çok uzun.","GPU device path is too long."));return;
+        }
         snprintf(request,sizeof(request),
-                 "{\"action\":\"start\",\"android\":true,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"cpus\":%d,\"cpu_percent\":%d}",
-                 qemu,disk,iso,ui->ram,ui->vm_w,ui->vm_h,ui->cpus,ui->cpu_percent);
+                 "{\"action\":\"start\",\"android\":true,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"rendernode\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"cpus\":%d,\"cpu_percent\":%d}",
+                 qemu,disk,iso,rendernode,ui->ram,ui->vm_w,ui->vm_h,ui->cpus,ui->cpu_percent);
         gui_queue(ui,request);gui_wipe(request,sizeof(request));return;
     }
     if (!ui->passwordless && ui->password[0] &&
@@ -751,6 +755,10 @@ static void gui_settings(MgGui *ui)
     nk_layout_row_dynamic(ctx, ui->row, 1);
     nk_checkbox_label(ctx,tr("Android: yerel sağlayıcı ve canlı yayın", "Android: local provider and livestream"),&ui->android);
     if(ui->android){
+        nk_layout_row_dynamic(ctx,ui->row,1);
+        nk_label(ctx,tr("GPU aygıtı", "GPU device"),NK_TEXT_LEFT);
+        nk_layout_row_dynamic(ctx,ui->row,1);
+        gui_edit(ui,8,ui->rendernode,sizeof(ui->rendernode));
         nk_layout_row_dynamic(ctx,ui->row,2);
         nk_property_int(ctx,"vCPU",1,&ui->cpus,4,1,1);
         nk_property_int(ctx,tr("CPU bütçesi %", "CPU budget %"),1,&ui->cpu_percent,400,10,1);
@@ -1490,6 +1498,7 @@ int mg_gui_run(MgEngine *engine)
     snprintf(ui->qemu,sizeof(ui->qemu),"%s",config->qemu);
     snprintf(ui->disk,sizeof(ui->disk),"%s",config->disk);
     snprintf(ui->iso,sizeof(ui->iso),"%s",config->iso);
+    snprintf(ui->rendernode,sizeof(ui->rendernode),"%s",config->rendernode);
     snprintf(ui->username,sizeof(ui->username),"megas");
     snprintf(ui->checkpoint,sizeof(ui->checkpoint),"step-1");
     ui->ram=(int)config->ram_mb;ui->vm_w=(int)config->width;ui->vm_h=(int)config->height;

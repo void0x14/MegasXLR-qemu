@@ -1162,14 +1162,6 @@ endif
 
 zlib = dependency('zlib', required: true)
 
-megas_stream_opt = get_option('megas_stream').require(
-  pixman.found(), error_message: 'Megas display requires pixman')
-megas_x264 = dependency('x264', required: megas_stream_opt,
-                        method: 'pkg-config')
-megas_yuv = cc.find_library('yuv', has_headers: ['libyuv/convert_from_argb.h'],
-                            required: megas_stream_opt)
-have_megas_stream = pixman.found() and megas_x264.found() and megas_yuv.found()
-
 libaio = not_found
 if not get_option('linux_aio').auto() or have_block
   libaio = cc.find_library('aio', has_headers: ['libaio.h'],
@@ -1794,6 +1786,17 @@ if (have_system or have_tools) and (virgl.found() or opengl.found())
   gbm = dependency('gbm', method: 'pkg-config', required: false)
 endif
 have_vhost_user_gpu = have_vhost_user_gpu and virgl.found() and opengl.found() and gbm.found()
+
+megas_stream_opt = get_option('megas_stream').require(
+  host_os == 'linux' and opengl.found() and gbm.found(),
+  error_message: 'Megas GPU stream requires Linux, EGL and GBM')
+megas_avcodec = dependency('libavcodec', version: '>=60', required: megas_stream_opt)
+megas_avfilter = dependency('libavfilter', version: '>=9', required: megas_stream_opt)
+megas_avutil = dependency('libavutil', version: '>=58', required: megas_stream_opt)
+megas_drm = dependency('libdrm', required: megas_stream_opt)
+have_megas_stream = (host_os == 'linux' and opengl.found() and gbm.found() and
+                    megas_avcodec.found() and megas_avfilter.found() and
+                    megas_avutil.found() and megas_drm.found())
 
 libcbor = not_found
 if not get_option('libcbor').auto() or have_system

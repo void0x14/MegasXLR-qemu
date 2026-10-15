@@ -1,8 +1,8 @@
-name: Megas fork QEMU native video
+name: Megas GPU stream build (not Android qualification)
 on:
   push:
     branches: ['work/android-runtime-native-stream']
-    paths: ['ui/megas*', 'ui/meson.build', 'qapi/ui.json', 'meson*', 'tools/megas/**', '.github/workflows/megas-qemu.yml']
+    paths: ['ui/megas*', 'ui/meson.build', 'qapi/ui.json', 'meson*', 'scripts/meson-buildoptions.sh', 'tools/megas/**', '.github/workflows/megas-qemu.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -10,41 +10,48 @@ concurrency:
   group: megas-fork-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  native-video:
+  compile-and-negative-checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - name: Install source build and independent decoder dependencies
+      - name: Install hardware pipeline build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential ninja-build pkg-config python3-venv libglib2.0-dev libpixman-1-dev zlib1g-dev libx264-dev libyuv-dev libfdt-dev libslirp-dev ffmpeg libx11-dev
-      - name: Configure this fork, without distribution QEMU
+          sudo apt-get install -y build-essential ninja-build pkg-config python3-venv libglib2.0-dev libpixman-1-dev zlib1g-dev libfdt-dev libslirp-dev libepoxy-dev libgbm-dev libdrm-dev libvirglrenderer-dev libavcodec-dev libavfilter-dev libavutil-dev ffmpeg libx11-dev
+      - name: Configure this fork with mandatory GPU dependencies
         run: |
           mkdir build-native
           cd build-native
-          ../configure --target-list=x86_64-softmmu --disable-docs --disable-debug-info --enable-werror --disable-rust --enable-pixman --enable-megas-stream --enable-slirp
-      - name: Build the actual fork and encoder fixture
+          ../configure --target-list=x86_64-softmmu --disable-docs --disable-debug-info --enable-werror --disable-rust --enable-opengl --enable-virglrenderer --enable-megas-stream --enable-slirp
+      - name: Compile actual fork and hardware fixture
         run: |
-          cc -std=c11 -Wall -Wextra -Werror -O2 -DMEGAS_VIDEO_STANDALONE -Iui tools/megas/tests/video_fixture.c ui/megas-video.c -lx264 -lyuv -o build-native/video-fixture
-          build-native/video-fixture > build-native/encoder-smoke.ts
+          cc -std=c11 -Wall -Wextra -Werror -O2 -DMEGAS_VIDEO_STANDALONE -Iui tools/megas/tests/gpu_video_fixture.c ui/megas-video.c ui/megas-mpegts.c $(pkg-config --cflags --libs libavcodec libavfilter libavutil libdrm gbm epoxy) -o build-native/gpu-video-fixture
+          build-native/gpu-video-fixture --negative
           ninja -C build-native -j2 qemu-system-x86_64 qemu-img
-      - name: Decode real native output and validate guest input and reconnect
+      - name: Reject missing GPU configuration, without software fallback
         run: |
-          python3 tools/megas/tests/test_native_video.py --encoder build-native/video-fixture --qemu build-native/qemu-system-x86_64 --output build-native/video-proof
-      - name: Run controller checks against the fork runtime
+          set -euo pipefail
+          if build-native/qemu-system-x86_64 -display megas,port=49396,rendernode=/dev/dri/renderD65535 -machine none > build-native/no-gpu.log 2>&1; then
+            echo 'Unexpected CPU fallback accepted'; exit 1
+          fi
+          grep -F 'no CPU-copy fallback' build-native/no-gpu.log
+      - name: Controller regression checks
+        run: make -C tools/megas headless test-engine test-android test-stream test-task-budget
+      - name: Record the limits of this runner
         run: |
-          make -C tools/megas headless
-          MEGAS_QEMU="$PWD/build-native/qemu-system-x86_64" MEGAS_QEMU_IMG="$PWD/build-native/qemu-img" make -C tools/megas test-engine test-android test-stream test-task-budget
-      - name: Preserve actual fork binaries and video evidence
+          printf '%s\n' 'This job verifies compilation and negative behavior only.' 'It does not qualify zero-copy hardware execution, Android releases, real UI state or task timing.' > build-native/QUALIFICATION.txt
+          cat build-native/QUALIFICATION.txt
+      - name: Preserve build diagnostics and hardware fixture
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: megas-fork-native-video
+          name: megas-gpu-build-unqualified
           path: |
-            build-native/video-proof/
             build-native/qemu-system-x86_64
             build-native/qemu-img
-            build-native/video-fixture
+            build-native/gpu-video-fixture
+            build-native/no-gpu.log
+            build-native/QUALIFICATION.txt
             build-native/meson-logs/meson-log.txt
           if-no-files-found: warn

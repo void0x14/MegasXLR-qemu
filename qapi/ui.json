@@ -1433,6 +1433,8 @@
 #
 # @port: TCP source port, bound to 127.0.0.1.  Required; 1..65535.
 #
+# @rendernode: DRM render node shared by the GPU and hardware encoder.
+#
 # @fps: Maximum refresh rate, 1..60 (default: 30).
 #
 # @bitrate: H.264 bitrate limit in kbit/s, 1..20000 (default: 1500).
@@ -1441,7 +1443,8 @@
 ##
 { 'struct': 'DisplayMegas',
   'if': 'CONFIG_MEGAS_STREAM',
-  'data': { 'port': 'uint16', '*fps': 'uint8', '*bitrate': 'uint32' } }
+  'data': { 'port': 'uint16', 'rendernode': 'str',
+            '*fps': 'uint8', '*bitrate': 'uint32' } }
 
 ##
 # @DisplayType:
@@ -1477,7 +1480,7 @@
 #
 # @dbus: Start a D-Bus service for the display.  (Since 7.0)
 #
-# @megas: Native H.264/MPEG-TS software display.  (Since 11.2)
+# @megas: DMA-BUF hardware H.264/MPEG-TS display.  (Since 11.2)
 #
 # Since: 2.12
 ##

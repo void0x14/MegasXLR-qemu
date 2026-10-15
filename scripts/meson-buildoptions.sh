@@ -156,7 +156,7 @@ meson_options_help() {
   printf "%s\n" '  lzfse           lzfse support for DMG images'
   printf "%s\n" '  lzo             lzo compression support'
   printf "%s\n" '  malloc-trim     enable libc malloc_trim() for memory optimization'
-  printf "%s\n" '  megas-stream    Megas native H.264/MPEG-TS software display'
+  printf "%s\n" '  megas-stream    Megas DMA-BUF hardware H.264/MPEG-TS display'
   printf "%s\n" '  membarrier      membarrier system call (for Linux 4.14+ or Windows'
   printf "%s\n" '  modules         modules support (non Windows)'
   printf "%s\n" '  mpath           Multipath persistent reservation passthrough'

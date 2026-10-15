@@ -1261,6 +1261,8 @@ cfg->stream_port=49397;
 cfg->cpus=1;
 cfg->cpu_percent=100;
 cfg->max_threads=48;
+snprintf(cfg->rendernode,sizeof(cfg->rendernode),"/dev/dri/renderD128");
+if(!mgp_env("MEGAS_RENDER_NODE",env,sizeof(env)))snprintf(cfg->rendernode,sizeof(cfg->rendernode),"%.63s",env);
 snprintf(cfg->accel,sizeof(cfg->accel),"auto");
 if(!mgp_env("MEGAS_CGROUP_PARENT",env,sizeof(env)))snprintf(cfg->cgroup_parent,sizeof(cfg->cgroup_parent),"%s",env);
 cfg->passwordless=1;
@@ -1755,6 +1757,7 @@ VM_START_FAIL();
           e->cfg.android=jeq(j,token,"true");
       }
       if(config_string(j,"accel",e->cfg.accel,sizeof(e->cfg.accel))||
+         config_string(j,"rendernode",e->cfg.rendernode,sizeof(e->cfg.rendernode))||
          config_string(j,"cgroup_parent",e->cfg.cgroup_parent,sizeof(e->cfg.cgroup_parent))){feedback(e,"Invalid acceleration or delegated resource path.");VM_START_FAIL();}
       if(!strcmp(e->cfg.accel,"auto"))snprintf(e->cfg.accel,sizeof(e->cfg.accel),"%s",mgp_default_accel());
       if(strcmp(e->cfg.accel,"kvm")&&strcmp(e->cfg.accel,"whpx")&&strcmp(e->cfg.accel,"hvf")&&strcmp(e->cfg.accel,"tcg")){
@@ -1802,6 +1805,12 @@ snprintf(vnc,sizeof(vnc),"127.0.0.1:%u",e->cfg.vnc_port-5900);
 
     snprintf(memory,sizeof(memory),"%u",e->cfg.ram_mb);
 snprintf(video,sizeof(video),"virtio-vga,xres=%u,yres=%u",e->cfg.width,e->cfg.height);
+if(e->cfg.android){
+    size_t i;
+    if(strncmp(e->cfg.rendernode,"/dev/dri/renderD",16)||!e->cfg.rendernode[16]){feedback(e,"Choose an explicit GPU DRM render node, for example /dev/dri/renderD128.");VM_START_FAIL();}
+    for(i=16;e->cfg.rendernode[i];i++)if(!isdigit((unsigned char)e->cfg.rendernode[i])){feedback(e,"DRM render node must use its /dev/dri/renderD<number> path.");VM_START_FAIL();}
+    snprintf(video,sizeof(video),"virtio-vga-gl,xres=%u,yres=%u",e->cfg.width,e->cfg.height);
+}
 
     argv[n++]=e->cfg.qemu;
 argv[n++]="-accel";
@@ -1812,12 +1821,11 @@ argv[n++]="-m";
 argv[n++]=memory;
 argv[n++]="-qmp";
 argv[n++]=qmp;
-argv[n++]="-vnc";
-argv[n++]=vnc;
+if(!e->cfg.android){argv[n++]="-vnc";argv[n++]=vnc;}
 
     argv[n++]="-display";
 if(e->cfg.android){
-    snprintf(native_display,sizeof(native_display),"megas,port=%u,fps=30,bitrate=1500",e->cfg.video_port);
+    snprintf(native_display,sizeof(native_display),"megas,gl=on,rendernode=%s,port=%u,fps=30,bitrate=1500",e->cfg.rendernode,e->cfg.video_port);
     argv[n++]=native_display;
 }else argv[n++]="none";
 argv[n++]="-device";
@@ -1957,11 +1965,13 @@ strcpy(e->status.phase,"starting");
         else if(e->disk_base_known)snprintf(checkpoint_status,sizeof(checkpoint_status),"Checkpoint catalog verified; allocation budget: %llu MiB (minimum 2048 MiB, scales with RAM).",(unsigned long long)(snapshot_budget_bytes(e)/(1024*1024)));
         else snprintf(checkpoint_status,sizeof(checkpoint_status),"Existing checkpoints were imported; new saves are unavailable because disk allocation could not be verified.");
     }else snprintf(checkpoint_status,sizeof(checkpoint_status),"Manual checkpoints require a qcow2 disk and snapshot-capable QEMU.");
+    if(!e->cfg.android){
     if(mg_rfb_connect(e->display,"127.0.0.1",e->cfg.vnc_port,error,sizeof(error)))feedback(e,"VM started; live display is connecting: %.300s. %.180s",error,checkpoint_status);
 
     else {display_tick(e);
 feedback(e,"VM started. Live display is connected. %s",checkpoint_status);
 }
+    }
     refresh_state(e);
     if(e->cfg.android){
         e->android_state[0]=e->android_epoch[0]=0;e->android_revision=e->android_received=0;
@@ -3028,7 +3038,7 @@ repair(e,"process_exit");
     guest_job_tick(e);
     guest_auto_tick(e);
     ocr_tick(e);
-    if(e->status.connected&&!e->last_rfb&&mgp_now()-e->last_rfb_attempt>250){if(!mg_rfb_connect(e->display,"127.0.0.1",e->cfg.vnc_port,error,sizeof(error)))display_tick(e);
+    if(!e->cfg.android&&e->status.connected&&!e->last_rfb&&mgp_now()-e->last_rfb_attempt>250){if(!mg_rfb_connect(e->display,"127.0.0.1",e->cfg.vnc_port,error,sizeof(error)))display_tick(e);
 e->last_rfb_attempt=mgp_now();
 }
     if(e->status.connected&&!e->late_id&&!e->job_active&&mgp_now()-e->last_state>1000)refresh_state(e);

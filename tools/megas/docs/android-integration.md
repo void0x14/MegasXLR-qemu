@@ -5,49 +5,51 @@ an Android distribution, an ARM translator, a Google Apps installer or an
 Android compatibility certification. The private accessibility provider and its
 local build recipe are not in this repository, its tests, CI or packages.
 
-## What runs
+## GPU video path under development
 
-One controller owner thread services QMP, the existing RFB preview, a persistent
-semantic channel and a continuous MPEG-TS relay. Android launch selects the
-fork's native `-display megas,port=49396,fps=30,bitrate=1500` backend. It encodes
-software display updates directly to baseline H.264 and MPEG-TS. A guest video
-provider is no longer needed. This backend has one encoding worker, with x264
-also restricted to one thread, no B frames or lookahead, and at most one latest
-pending display buffer. Intermediate updates are replaced while encoding is
-busy. RGB-to-I420 conversion uses libyuv SIMD. No screendump command, image file,
-encoder subprocess or recording spool is involved.
+Android launch uses the fork's GPU display backend with an explicit render node:
+`-display megas,gl=on,rendernode=/dev/dri/renderD128,port=49396,fps=30,bitrate=1500`.
+The listener exports GL scanout as DMA-BUF descriptors; existing DMA-BUF scanout
+can also be referenced directly. It has no raw pixel pointer, shadow framebuffer,
+CPU pixel copy, `glReadPixels`, RGB-to-YUV CPU conversion or software encoder.
+The encoder graph is fixed to DRM PRIME, `hwmap` with `read+direct`, VAAPI GPU
+color conversion/orientation, and `h264_vaapi`. Automatic filter conversion is
+disabled. Direct import failure is an error, never an upload/download fallback.
+These are implementation constraints, not a hardware zero-copy qualification.
+Driver behavior and actual output still require measurement on a real GPU.
 
-The encoder emits PAT/PMT with each access unit, a keyframe at least every second,
-and a fresh keyframe on reconnect. An unchanged screen is encoded only about once
-a second; cheap adaptation-only PCR packets keep the transport clock alive in
-between. Changing screens use at most the configured refresh rate. Nonblocking source writes drop
-the connection on backpressure instead of queuing delayed video. The backend
-currently supports software scanout only, not GL/dmabuf scanout. This is still
-an integration under development; the dedicated fork workflow decodes native
-output independently with FFmpeg, including actual BIOS keyboard input, and is
-distinct from Android compatibility testing. There is no glass-to-glass latency
-measurement yet. HLS playlists are not implemented.
+One encoding worker owns one in-flight descriptor. Native GPU fences precede
+consumption, and QEMU blocks reuse of the producer scanout until the worker has
+released the imported frames. Duplicating a DMA-BUF FD alone does not make its
+pixels immutable. No delayed raw image queue is maintained. The configured
+encoder has no B frames, one asynchronous submission, and must return the same
+PTS/DTS as the submitted frame; delayed/reordered output fails the stream.
 
-The host bounds each video client's pending output to about 24 KiB, accepts
-four viewers, and disconnects slow viewers instead of accumulating video lag.
-It validates TS packet sync, not codec content. Four control clients also have
-bounded nonblocking response buffers. The relay stops viewers on source loss.
+An idle source needs only clock packets between periodic refreshes. Slow output
+connections close instead of accumulating video latency. The MPEG-TS mux and
+HTTP relay still handle **encoded bytes** in CPU buffers. They are not a
+zero-copy network transport. GPU color conversion writes GPU-owned NV12 output;
+it does not transfer raw pixels through CPU memory. No end-to-end zero-copy or
+zero-latency result is claimed by compilation or by an absent-GPU rejection test.
 
-`megas agent` now returns controller/semantic state and stream discovery
-without exporting PNGs or starting OCR. `--vision` enables optional PNG
-results; `--text-only` explicitly selects the legacy OCR path. Existing
-non-Android CLI commands retain their optional image behavior. A model/harness
-must support consuming the video endpoint separately: an MCP text tool response
-containing a stream URL does not itself make a model watch a livestream.
+Android launch does not enable VNC/RFB, which could introduce a readback path.
+The existing RFB preview continues to serve ordinary non-Android VMs. A native
+GPU preview in the command centre and a model adapter that actually consumes the
+encoded stream are still required; returning a stream URL does not itself make
+a model watch live video. HLS playlists are not implemented.
+
+The controller relays 188-byte MPEG-TS packets on an authenticated loopback HTTP
+endpoint, accepts four viewers, and bounds pending encoded output to about
+24 KiB per viewer. It does not take screenshots to produce video. Screenshots
+and OCR remain explicit optional operations where supported, not agent defaults.
 
 ## Native VM launch and host budgets
 
-The current launch device model is an **x86 PC**. The existing executable
-selection is not an implementation of an ARM Android board or Google's
-goldfish/ranchu device model. Suitable locally prepared x86 images can use:
+The current launch device model is an **x86 PC**. The GPU device is currently `virtio-vga-gl`. This does not implement legacy
+Android graphics drivers, an ARM Android board or Google's goldfish/ranchu model. Suitable locally prepared x86 images can use:
 
 ```json
-{"action":"start","android":true,"disk":"/local/android.qcow2","ram_mb":2048,"accel":"kvm","cpus":1,"cpu_percent":100,"max_threads":48}
+{"action":"start","android":true,"disk":"/local/android.qcow2","ram_mb":2048,"accel":"kvm","rendernode":"/dev/dri/renderD128","cpus":1,"cpu_percent":100,"max_threads":48}
 ```
 
 The GUI exposes the same Android switch and CPU budget. It does not download an
@@ -144,50 +146,46 @@ and regressing revisions invalidate handles. Completed/queued host timestamps,
 round-trip duration, event/rejection counters, stream age/bytes and disconnected
 slow-viewer counts are observable. They do not perform online model training.
 
-## Validation and remaining work
+## Acceptance evidence and remaining work
 
-`megas-qemu.yml` builds this fork from source, with compiler warnings treated as
-errors, and decodes the native display with independent FFmpeg. It checks RGB
-channel order, timestamp wrap, actual BIOS keyboard input, reconnect, host thread
-count, and capture-to-loopback latency. This last metric excludes rendering in
-a viewer and agent reasoning. `megas-android.yml` separately attempts an official
-checksum-verified Android-x86 9.0-r2 live ISO with a test-only serial boot-property
-observer in its initramfs. A BIOS test pass is not an Android boot pass.
+`megas-qemu.yml` builds the GPU path with compiler warnings treated as errors,
+builds the real GPU fixture, and checks rejection of missing hardware. Its cloud
+runner has no qualification GPU. Passing this job is evidence of compilation
+and negative behavior only. It is not an Android or zero-copy hardware pass.
+The earlier software encoder and BIOS video fixtures have been removed.
 
-The command centre repaints immediately for input and changed VM pixels/state;
-otherwise its UI refreshes four times a second. Its control loop still services
-IPC every iteration. Linux CI observes real XDamage events and control responses
-to check idle repaint rate without taking screenshots.
+`gpu-video-fixture /dev/dri/renderD128 > gpu-colors.ts` renders the source with
+GL, exports its DMA-BUF, imports directly into the hardware pipeline, and encodes
+60 color frames. It must run on real hardware and its output must be decoded
+independently to test channel order, frame completeness and timestamps. This is
+an encoder test, not proof of Android UI state or application correctness.
 
-`make test-stream` checks authenticated HTTP, source availability, fragmented
-byte-exact transfer, malformed-stream shutdown, and (when FFmpeg is installed
-for tests) end-to-end decoding of ten actual H.264 frames. `make test-android`
-uses a synthetic provider over real sockets to verify revision guards,
-coordinate rejection, result/queue distinction, uncertainty and privacy.
-`make test-isolation` additionally exercises real kernel thread, memory and CPU
-caps when `MEGAS_TEST_CGROUP_PARENT` is explicitly supplied. Without a delegated
-parent it reports a skip, not enforcement success. Linux CI supplies a separate
-temporary cgroup and checks thread-creation refusal, a contained OOM kill, CPU
-throttling counters, and group cleanup. These are host tests, not Android boot
-or application tests. The existing
-`test-task-budget` gate still requires real human/agent task reports and an
-independent success oracle; no Android scenario has been certified by these
-synthetic fixtures.
+Android qualification must use the actual live stream, actual accessibility
+state and an independent oracle for the effects of semantic actions. A boot
+property, a log message or a decoder accepting a video packet does not prove
+that an Android task succeeded. The former boot-property acceptance experiment
+has been removed. Each Android API/release and applicable application ABI needs
+its own real execution and state evidence; one Android 9 run cannot establish
+Android 4–17 coverage. No such complete set of executions exists here yet.
 
-Remaining implementation/qualification includes the local private provider and
-its research/fork/build, per-version Android 4–17 image/device
-profiles, verified ARM ABI translation or matching ARM hardware, Play/GApps
-image management, modified-image coverage, Windows hard thread isolation, and
-real application and human-time comparisons. No measured reduction of the
-reported 343-thread Android instance has been established: that instance and
-the user's local PC are not connected to this environment.
+`make test-stream` tests encoded relay behavior. `make test-android` uses a
+synthetic semantic provider to check revision guards, coordinate rejection,
+queue/result distinction, uncertainty and privacy. These synthetic host tests
+do not qualify real Android behavior. `test-task-budget` validates real task
+reports against the human baseline; its unit tests are not task measurements.
 
-Primary-source feasibility checks: [Android accessibility node API](https://developer.android.com/reference/android/view/accessibility/AccessibilityNodeInfo),
-[scrcpy architecture](https://github.com/Genymobile/scrcpy/blob/master/doc/develop.md),
-[scrcpy prerequisites](https://github.com/Genymobile/scrcpy#prerequisites),
-[Appium server](https://github.com/appium/appium-uiautomator2-server),
-[OpenATX server](https://github.com/openatx/android-uiautomator-server),
-[Android 17 setup](https://developer.android.com/about/versions/17/get).
-Scrcpy's documented API 21 minimum cannot cover Android 4. Its MediaCodec video
-path is evidence for an encoded source design, not an accessibility tree or a
-fork integrated here. No third-party private fork has been claimed or uploaded.
+`make test-isolation` checks real kernel thread, memory and CPU caps when a
+parent cgroup is supplied. Otherwise it explicitly skips enforcement testing.
+The native UI redraws on input and changed VM pixels/state, with a four-Hz idle
+refresh. Linux CI measures actual XDamage events and control response time,
+without screenshots. This is a UI/IPC test, not an Android task benchmark.
+
+Work still includes actual GPU qualification, native GPU preview, the user's
+local-only private accessibility fork/build, the live-video model adapter,
+per-release Android 4–17 graphics/device/image integration, ARM application
+support, Play/GApps image management, modified image coverage, Windows GPU and
+thread isolation, and real application/human-time comparisons. The reported
+343-thread Android instance and the user's local PC are not connected here;
+its resource usage has not been measured or corrected by these cloud tests.
+The private accessibility source and its build recipe must remain solely on
+that local PC and must not be placed in this public repository or cloud CI.

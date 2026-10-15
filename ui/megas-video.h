@@ -1,24 +1,24 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef QEMU_MEGAS_VIDEO_H
 #define QEMU_MEGAS_VIDEO_H
-
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-
+#include "megas-mpegts.h"
+#define MEGAS_DMA_PLANES 4
+/* Metadata and borrowed DMA-BUF FDs only. No raw pixel pointers or CPU buffers. */
+typedef struct MegasDmaFrame {
+    unsigned width, height, backing_width, backing_height, x, y, planes;
+    uint32_t fourcc;
+    uint64_t modifier;
+    bool y0_top;
+    int fd[MEGAS_DMA_PLANES];
+    uint32_t offset[MEGAS_DMA_PLANES], stride[MEGAS_DMA_PLANES];
+} MegasDmaFrame;
 typedef struct MegasVideo MegasVideo;
-/* Return false to abandon this connection; no encoded data is queued. */
-typedef bool (*MegasVideoWrite)(void *opaque, const uint8_t *data, size_t size);
-
-MegasVideo *megas_video_new(unsigned width, unsigned height, unsigned fps,
-                          unsigned bitrate_kbps);
-/* BGRA byte order; timestamp is monotonic, in 90 kHz units. */
-bool megas_video_encode(MegasVideo *video, const uint8_t *bgra, int stride,
-                        int64_t timestamp, bool force_keyframe,
-                        MegasVideoWrite write, void *opaque);
-/* Keep the transport clock alive without copying or encoding an idle screen. */
-bool megas_video_keepalive(MegasVideo *video, int64_t timestamp,
-                           MegasVideoWrite write, void *opaque);
-void megas_video_free(MegasVideo *video);
-
+MegasVideo *megas_video_new(const MegasDmaFrame *, unsigned fps,
+                           unsigned bitrate_kbps, const char *rendernode,
+                           char *error, size_t capacity);
+bool megas_video_encode(MegasVideo *, const MegasDmaFrame *, int64_t timestamp,
+                        bool keyframe, MegasPacketWrite, void *,
+                        char *error, size_t capacity);
+bool megas_video_keepalive(MegasVideo *, int64_t, MegasPacketWrite, void *);
+void megas_video_free(MegasVideo *);
 #endif
