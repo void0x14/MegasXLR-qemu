@@ -3,9 +3,14 @@
 """Contract tests for the human-relative Android task-time gate."""
 
 import copy
+import contextlib
+import io
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
-from check_task_budget import validate_report
+from check_task_budget import main, validate_report
 
 
 def valid_report(agent_seconds=410.0, oracle_result="pass"):
@@ -140,6 +145,26 @@ class TaskBudgetTests(unittest.TestCase):
             for result in results for error in result["errors"]
         ))
         self.assertTrue(any(not result["passed"] for result in results))
+
+    def test_cli_accepts_a_passing_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+            path.write_text(json.dumps(valid_report()), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = main([str(path)])
+        self.assertEqual(result, 0)
+        self.assertIn("PASS: android-api14-armeabi-v7a-aosp", output.getvalue())
+
+    def test_cli_rejects_a_slow_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+            path.write_text(json.dumps(valid_report(agent_seconds=411)), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = main([str(path)])
+        self.assertEqual(result, 1)
+        self.assertIn("agent exceeded human median", output.getvalue())
 
 
 if __name__ == "__main__":
