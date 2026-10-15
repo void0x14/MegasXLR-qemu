@@ -77,7 +77,7 @@ static void *megas_worker(void *opaque)
     MegasVideo *encoder = NULL;
     uint8_t *pixels = NULL;
     unsigned width = 0, height = 0, encoded_width = 0, encoded_height = 0;
-    int64_t timestamp, last_keyframe = -90000;
+    int64_t timestamp, last_keyframe = -90000, last_write_ms = 0;
     bool force_keyframe = true;
 
     for (;;) {
@@ -98,7 +98,7 @@ static void *megas_worker(void *opaque)
         }
         qemu_mutex_lock(&s->lock);
         if (!s->stop && (!s->pending || s->client < 0)) {
-            qemu_cond_timedwait(&s->ready, &s->lock, 50);
+            qemu_cond_timedwait(&s->ready, &s->lock, 20);
         }
         if (s->stop) {
             qemu_mutex_unlock(&s->lock);
@@ -106,6 +106,14 @@ static void *megas_worker(void *opaque)
         }
         if (!s->pending || s->client < 0) {
             qemu_mutex_unlock(&s->lock);
+            int64_t now = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            if (encoder && s->client >= 0 && now - last_write_ms >= 40) {
+                if (!megas_video_keepalive(encoder, now * 90, megas_write, s) ||
+                    !megas_flush(s)) {
+                    megas_disconnect(s);
+                }
+                last_write_ms = now;
+            }
             continue;
         }
         /* At most one latest update waits while the worker encodes. */
@@ -144,6 +152,7 @@ static void *megas_worker(void *opaque)
         if (force_keyframe) {
             last_keyframe = timestamp;
         }
+        last_write_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
         force_keyframe = false;
     }
     if (s->client >= 0) {
@@ -166,7 +175,7 @@ static void megas_refresh(DisplayChangeListener *dcl)
     if (!s->surface || qemu_mutex_trylock(&s->lock)) {
         return;
     }
-    if (!s->connected || (!s->dirty && now - s->published_ms < 100)) {
+    if (!s->connected || (!s->dirty && now - s->published_ms < 1000)) {
         qemu_mutex_unlock(&s->lock);
         return;
     }

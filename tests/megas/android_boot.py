@@ -151,9 +151,9 @@ def main():
         probe = json.loads(subprocess.check_output([
             'ffprobe', '-v', 'error', '-show_streams', '-count_frames',
             '-of', 'json', str(stream)]))['streams'][0]
-        assert probe['codec_name'] == 'h264' and int(probe['nb_read_frames']) >= 10
+        assert probe['codec_name'] == 'h264' and int(probe['nb_read_frames']) >= 3
         run('ffmpeg', '-v', 'error', '-threads', '1', '-i', str(stream),
-            '-frames:v', '10', '-threads', '1', '-f', 'null', '-')
+            '-frames:v', '3', '-threads', '1', '-f', 'null', '-')
         report = {'android': '9.0-r2', 'api': 28, 'accel': accel,
                   'instrumented_test_initrd': True, 'iso_sha256': sha256,
                   'boot_completed_seconds': round(boot_seconds, 3),

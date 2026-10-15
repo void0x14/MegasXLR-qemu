@@ -23,7 +23,7 @@ jobs:
         run: |
           mkdir build-native
           cd build-native
-          ../configure --target-list=x86_64-softmmu --disable-docs --disable-debug-info --enable-werror --disable-rust --enable-pixman -Dmegas_stream=enabled
+          ../configure --target-list=x86_64-softmmu --disable-docs --disable-debug-info --enable-werror --disable-rust --enable-pixman --enable-megas-stream
       - name: Build the actual fork and encoder fixture
         run: |
           cc -std=c11 -Wall -Wextra -Werror -O2 -DMEGAS_VIDEO_STANDALONE -Iui tools/megas/tests/video_fixture.c ui/megas-video.c -lx264 -lyuv -o build-native/video-fixture

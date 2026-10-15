@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import statistics
 import subprocess
 import time
 
@@ -48,7 +49,28 @@ def fixture_test(executable, root):
             'color_order': 'passed', 'bytes': len(data)}
 
 
-def receive(sock, seconds):
+class SourceTiming:
+    def __init__(self):
+        self.pending = bytearray()
+        self.latencies = []
+
+    def feed(self, data):
+        self.pending.extend(data)
+        while len(self.pending) >= 188:
+            packet = self.pending[:188]
+            del self.pending[:188]
+            assert packet[0] == 0x47
+            # PCR accompanying an actual video access unit, not idle keepalive.
+            if packet[1:3] != b'\x41\x00' or not packet[3] & 0x20:
+                continue
+            assert packet[4] >= 7 and packet[5] & 0x10
+            pcr = (packet[6] << 25 | packet[7] << 17 | packet[8] << 9 |
+                   packet[9] << 1 | packet[10] >> 7)
+            elapsed = (int(time.monotonic() * 90000) - pcr) % (1 << 33)
+            self.latencies.append(elapsed / 90)
+
+
+def receive(sock, seconds, timing=None):
     data = bytearray()
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -59,6 +81,8 @@ def receive(sock, seconds):
         if not chunk:
             raise AssertionError('native stream disconnected unexpectedly')
         data.extend(chunk)
+        if timing is not None:
+            timing.feed(chunk)
         assert len(data) < 16 * 1024 * 1024, 'unexpected bitrate growth'
     return data
 
@@ -100,13 +124,14 @@ def native_test(qemu, root):
         assert options['type'] == 'megas' and options['port'] == port
         # Allow the BIOS to enter the fixture before capturing the stable screen.
         time.sleep(2)
+        timing = SourceTiming()
         with socket.create_connection(('127.0.0.1', port), timeout=5) as video:
             video.settimeout(0.2)
-            before = receive(video, 2)
+            before = receive(video, 2, timing)
             threads = len(list(Path(f'/proc/{process.pid}/task').iterdir()))
             assert threads <= 12, f'unexpected host thread count {threads}'
             execute('send-key', {'keys': [{'type': 'qcode', 'data': 'x'}]})
-            after = receive(video, 2)
+            after = receive(video, 2, timing)
         # Both samples must decode independently after their next IDR.
         before_path, after_path = root / 'before.ts', root / 'after.ts'
         before_path.write_bytes(before)
@@ -116,7 +141,7 @@ def native_test(qemu, root):
             str(before_path)]))['streams'][0]
         size = probe['width'] * probe['height'] * 3
         before_raw, after_raw = decode(before_path), decode(after_path)
-        assert len(before_raw) >= 5 * size and len(after_raw) >= 5 * size
+        assert len(before_raw) >= size and len(after_raw) >= size
         first = hashlib.sha256(before_raw[-size:]).hexdigest()
         last = hashlib.sha256(after_raw[-size:]).hexdigest()
         assert first != last, 'native video did not reflect actual guest input'
@@ -126,13 +151,18 @@ def native_test(qemu, root):
             reconnect = receive(video, 2)
         path = root / 'reconnected.ts'
         path.write_bytes(reconnect)
-        assert len(decode(path)) >= 5 * size
+        assert len(decode(path)) >= size
+        assert len(timing.latencies) >= 3
+        assert max(timing.latencies) < 1000, timing.latencies
         execute('quit')
         process.wait(timeout=10)
         assert process.returncode == 0
         return {'guest': 'BIOS keyboard fixture, not Android',
                 'resolution': [probe['width'], probe['height']],
                 'qemu_host_threads': threads, 'input_changes_video': True,
+                'source_capture_to_socket_ms_median': round(statistics.median(timing.latencies), 3),
+                'source_capture_to_socket_ms_max': round(max(timing.latencies), 3),
+                'latency_scope': 'software display capture to loopback socket; not glass-to-glass',
                 'reconnect_decode': True, 'qemu_exit': process.returncode,
                 'before_sha256': first, 'after_sha256': last}
     finally:

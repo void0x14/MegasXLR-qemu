@@ -16,6 +16,9 @@ MegasVideo *megas_video_new(unsigned width, unsigned height, unsigned fps,
 bool megas_video_encode(MegasVideo *video, const uint8_t *bgra, int stride,
                         int64_t timestamp, bool force_keyframe,
                         MegasVideoWrite write, void *opaque);
+/* Keep the transport clock alive without copying or encoding an idle screen. */
+bool megas_video_keepalive(MegasVideo *video, int64_t timestamp,
+                           MegasVideoWrite write, void *opaque);
 void megas_video_free(MegasVideo *video);
 
 #endif

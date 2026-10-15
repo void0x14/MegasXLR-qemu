@@ -61,6 +61,36 @@ static void put_pts(uint8_t *p, uint64_t pts)
     p[4] = 1 | ((pts << 1) & 0xfe);
 }
 
+static void put_pcr(uint8_t *p, uint64_t pts)
+{
+    p[0] = pts >> 25;
+    p[1] = pts >> 17;
+    p[2] = pts >> 9;
+    p[3] = pts >> 1;
+    p[4] = ((pts & 1) << 7) | 0x7e;
+    p[5] = 0;
+}
+
+bool megas_video_keepalive(MegasVideo *v, int64_t timestamp,
+                           MegasVideoWrite write, void *opaque)
+{
+    uint8_t packet[188];
+
+    if (!v || timestamp < 0 || !write) {
+        return false;
+    }
+    memset(packet, 0xff, sizeof(packet));
+    packet[0] = 0x47;
+    packet[1] = 0x01;
+    packet[2] = 0;
+    /* Adaptation-only packets do not increment the continuity counter. */
+    packet[3] = 0x20 | ((v->video_cc - 1) & 15);
+    packet[4] = 183;
+    packet[5] = 0x10;
+    put_pcr(packet + 6, timestamp);
+    return write(opaque, packet, sizeof(packet));
+}
+
 static bool access_unit(MegasVideo *v, const uint8_t *data, size_t size,
                         uint64_t pts, bool keyframe,
                         MegasVideoWrite write, void *opaque)
@@ -104,12 +134,7 @@ static bool access_unit(MegasVideo *v, const uint8_t *data, size_t size,
                 packet[5] = first ? 0x10 | (keyframe ? 0x40 : 0) : 0;
             }
             if (first) {
-                packet[6] = pts >> 25;
-                packet[7] = pts >> 17;
-                packet[8] = pts >> 9;
-                packet[9] = pts >> 1;
-                packet[10] = ((pts & 1) << 7) | 0x7e;
-                packet[11] = 0;
+                put_pcr(packet + 6, pts);
             }
         }
         start = 4 + adaptation;

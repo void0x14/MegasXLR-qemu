@@ -18,8 +18,9 @@ busy. RGB-to-I420 conversion uses libyuv SIMD. No screendump command, image file
 encoder subprocess or recording spool is involved.
 
 The encoder emits PAT/PMT with each access unit, a keyframe at least every second,
-and a fresh keyframe on reconnect. An unchanged screen updates at 10 fps; changing
-screens use at most the configured refresh rate. Nonblocking source writes drop
+and a fresh keyframe on reconnect. An unchanged screen is encoded only about once
+a second; cheap adaptation-only PCR packets keep the transport clock alive in
+between. Changing screens use at most the configured refresh rate. Nonblocking source writes drop
 the connection on backpressure instead of queuing delayed video. The backend
 currently supports software scanout only, not GL/dmabuf scanout. This is still
 an integration under development; the dedicated fork workflow decodes native

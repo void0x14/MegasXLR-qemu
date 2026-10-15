@@ -42,8 +42,7 @@ jobs:
           printf '2415919104\n' | sudo tee "$scope/memory.max" >/dev/null
           printf '0\n' | sudo tee "$scope/memory.swap.max" >/dev/null
           printf '48\n' | sudo tee "$scope/pids.max" >/dev/null
-          sudo chown "$(id -u):$(id -g)" "$scope/cgroup.procs"
-          python3 tests/megas/android_boot.py --iso android.iso --qemu fork-runtime/qemu-system-x86_64 --cgroup "$scope" --output android-proof
+          sudo python3 tests/megas/android_boot.py --iso android.iso --qemu fork-runtime/qemu-system-x86_64 --cgroup "$scope" --output android-proof
       - name: Preserve Android boot and stream evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

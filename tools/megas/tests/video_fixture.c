@@ -30,6 +30,10 @@ int main(void)
                                  i == 0, output, stdout)) {
             return 2;
         }
+        if (!megas_video_keepalive(v, (INT64_C(1) << 33) - 9000 +
+                                    i * 3000 + 1500, output, stdout)) {
+            return 3;
+        }
     }
     megas_video_free(v);
     return fflush(stdout) != 0;
