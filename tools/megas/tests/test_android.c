@@ -113,8 +113,11 @@ int main(void)
      assert(mg_live_control_up(e->live));
      peer=accept(control_server,NULL,NULL);assert(peer!=MGP_BAD_SOCKET);}
     feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":3,\"guest_monotonic_ms\":150,\"cause_action_id\":2,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
-    assert(e->android_revision==3&&e->android_revision_gaps>=1);
+    assert(e->android_revision==3);
     assert(e->android_guest_ms==150);
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":5,\"guest_monotonic_ms\":180,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
+    assert(e->android_revision==5&&e->android_revision_gaps>=1);
+    assert(e->android_guest_delta_ms==30);
     feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":2,\"guest_monotonic_ms\":140,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\",\"set_text\"]},{\"id\":\"n2\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
     assert(!e->android_revision);
     puts("android: heartbeat, timeout, no blind replay, explicit uncertainty acknowledgement, stale events invalidate handles");
