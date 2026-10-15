@@ -25,6 +25,7 @@
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 #ifdef __linux__
 #include <sys/prctl.h>
 #include <dirent.h>
@@ -332,6 +333,10 @@ void mgp_close(MgpSocket socket)
 }
 int mgp_nonblock(MgpSocket socket)
 {
+    /* Persistent control carries small event/action messages. Do not let
+     * Nagle coalesce them while a peer delays its acknowledgement. */
+    int immediate=1;
+    (void)setsockopt(socket,IPPROTO_TCP,TCP_NODELAY,(const char *)&immediate,sizeof(immediate));
 #ifdef _WIN32
     u_long on = 1;
     if (!SetHandleInformation((HANDLE)(UINT_PTR)socket,
