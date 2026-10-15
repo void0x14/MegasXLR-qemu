@@ -2168,13 +2168,13 @@ static void android_invalidate(MgEngine *e)
     e->android_state_host_ms=e->android_cause_action_id=0;
     if(e->android_pending){e->android_uncertain=1;snprintf(e->android_outcome,sizeof(e->android_outcome),"uncertain");}
 }
-static void android_tick(MgEngine *e)
+static int android_tick_one(MgEngine *e)
 {
     const char *line;
     Json *j;
     uint64_t revision, id, guest_ms, cause;
     char epoch[65], type[32], outcome[32];
-    if(!e->live)return;
+    if(!e->live)return 0;
     mg_live_tick(e->live);
     if(e->android_generation!=mg_live_generation(e->live)){
         e->android_generation=mg_live_generation(e->live);
@@ -2186,9 +2186,9 @@ static void android_tick(MgEngine *e)
         journal(e,"android_action_uncertain","Guest result deadline expired; no automatic replay. Inspect state and explicitly acknowledge the uncertain action before another mutation.");
     }
     line=mg_live_line(e->live);
-    if(!line[0])return;
+    if(!line[0])return 0;
     j=malloc(sizeof(*j));
-    if(!j)return;
+    if(!j)return 0;
     if(jparse(j,line)||j->t[0].type!='{'||jstring(j,jget(j,0,"type"),type,sizeof(type)))goto invalid;
     if(!strcmp(type,"state")){
         if(jstring(j,jget(j,0,"epoch"),epoch,sizeof(epoch))||!epoch[0]||
@@ -2227,12 +2227,24 @@ static void android_tick(MgEngine *e)
         if(!strcmp(outcome,"rejected"))e->android_rejected++;
         journal(e,"android_action_result",outcome);
     }else goto invalid;
-    free(j);return;
+    free(j);return 1;
 invalid:
     e->android_rejected++;
     /* Invalid state cannot leave previously usable handles looking fresh. */
     android_invalidate(e);
     free(j);
+    return 1;
+}
+/* Drain bursts without forcing the agent to wait for N separate owner
+ * iterations. Both work and latency are bounded; UI/video stay responsive. */
+static void android_tick(MgEngine *e)
+{
+    unsigned processed;
+    uint64_t began=mgp_now();
+    for(processed=0;processed<32;processed++){
+        if(!android_tick_one(e))break;
+        if(mgp_now()-began>=2)break;
+    }
 }
 static int android_act(MgEngine *e,Json *j)
 {
