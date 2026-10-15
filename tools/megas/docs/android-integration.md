@@ -103,11 +103,16 @@ The semantic provider is separate software built and installed on the user's
 computer. The public host treats its `payload` as opaque. It must emit:
 
 ```json
-{"type":"state","epoch":"boot-session-id","revision":1,"guest_monotonic_ms":100,"cause_action_id":0,"payload":{}}
+{"type":"state","epoch":"boot-session-id","revision":1,"guest_monotonic_ms":100,"cause_action_id":0,"targets":[{"id":"provider-issued-node-id","operations":["click","focus"]}],"payload":{}}
 ```
 
 This example defines only the public envelope. It contains no private tree
-representation. Revisions increase within an epoch. A bounded heartbeat may
+representation. The provider must include up to 256 `targets`, each with a stable
+nonempty `id` and the explicit `operations` currently permitted for that ID.
+The host rejects targets absent from its last observed revision, operations
+not advertised for that target, and malformed target envelopes. The provider
+must independently revalidate on execution; this check is not authority over
+private guest accessibility state. Revisions increase within an epoch. A bounded heartbeat may
 confirm an unchanged state using `type:heartbeat`, `epoch` and `revision`.
 `guest_monotonic_ms` and cause relationships are provider reports, not host
 clock synchronization or inferred proof of causality. State payloads remain in
