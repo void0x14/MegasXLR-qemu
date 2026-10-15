@@ -8,6 +8,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/stat.h>
 #include <stdint.h>
 #include <time.h>
@@ -21,7 +23,29 @@ typedef struct {
 } BudgetFixture;
 
 static char test_program[1024];
-static unsigned test_port = 52701;
+/* Each test fixture owns independent ephemeral listeners; fixed TCP ports
+ * collide with parallel jobs and unrelated runner processes. */
+static unsigned free_tcp_port(void)
+{
+    struct sockaddr_in address;
+    socklen_t length=sizeof(address);
+    MgpSocket socket=mgp_listen(0);
+    unsigned port;
+    assert(socket!=MGP_BAD_SOCKET);
+    assert(!getsockname(socket,(struct sockaddr *)&address,&length));
+    port=(unsigned)ntohs(address.sin_port);
+    mgp_close(socket);
+    return port;
+}
+static void fixture_ports(MgConfig *cfg)
+{
+    cfg->control_port=free_tcp_port();
+    cfg->qmp_port=free_tcp_port();
+    cfg->vnc_port=free_tcp_port();
+    assert(cfg->control_port!=cfg->qmp_port &&
+           cfg->control_port!=cfg->vnc_port &&
+           cfg->qmp_port!=cfg->vnc_port);
+}
 
 static void fake_trace(const char *path,const char *command,const char *tag) {
     FILE *file;
@@ -206,7 +230,7 @@ static void budget_start(BudgetFixture *fixture,const char *mode,unsigned ram_mb
     snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
     assert(strlen(fixture->runtime)+sizeof("/disk.qcow2")<=sizeof(cfg.disk));
     strcpy(cfg.disk,fixture->runtime);strcat(cfg.disk,"/disk.qcow2");
-    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.ram_mb=ram_mb;cfg.width=800;cfg.height=600;test_port+=10;
+    fixture_ports(&cfg);cfg.ram_mb=ram_mb;cfg.width=800;cfg.height=600;
     file=fopen(cfg.disk,"wb");assert(file);fputs("fake qcow2 fixture",file);fclose(file);
     file=fopen(fixture->catalog,"wb");assert(file);fclose(file);
     assert(!setenv("MEGAS_TEST_QMP_MODE",mode,1));assert(!setenv("MEGAS_TEST_QMP_CONTROL",fixture->control,1));assert(!setenv("MEGAS_TEST_QMP_TRACE",fixture->trace,1));assert(!setenv("MEGAS_TEST_QMP_CATALOG",fixture->catalog,1));unsetenv("MEGAS_TEST_QMP_CATALOG_MODE");
@@ -231,7 +255,7 @@ static void budget_reowner_start(BudgetFixture *fixture,const char *mode,unsigne
     snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
     assert(strlen(fixture->runtime)+sizeof("/disk.qcow2")<=sizeof(cfg.disk));
     strcpy(cfg.disk,fixture->runtime);strcat(cfg.disk,"/disk.qcow2");
-    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.ram_mb=ram_mb;cfg.width=800;cfg.height=600;test_port+=10;
+    fixture_ports(&cfg);cfg.ram_mb=ram_mb;cfg.width=800;cfg.height=600;
     assert(!setenv("MEGAS_TEST_QMP_MODE",mode,1));
     assert(!setenv("MEGAS_TEST_QMP_CATALOG",fixture->catalog,1));
     fixture->engine=mg_engine_new(&cfg);assert(fixture->engine);
@@ -435,7 +459,7 @@ int main(int argc,char **argv) {
     if(argv[0][0]=='/')snprintf(self,sizeof(self),"%s",argv[0]);else snprintf(self,sizeof(self),"%.700s/%.300s",cwd,argv[0]);
     snprintf(test_program,sizeof(test_program),"%s",self);
     mg_config_defaults(&cfg);snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",self);
-    cfg.control_port=52601;cfg.qmp_port=52602;cfg.vnc_port=52603;cfg.ram_mb=16;cfg.width=800;cfg.height=600;
+    fixture_ports(&cfg);cfg.ram_mb=16;cfg.width=800;cfg.height=600;
     snprintf(cfg.disk,sizeof(cfg.disk),"%s/disk.qcow2",runtime);file=fopen(cfg.disk,"wb");assert(file);fputs("fixture",file);fclose(file);
     e=mg_engine_new(&cfg);assert(e);
     assert(!mg_engine_submit(e,"{\"action\":\"start\"}",response,sizeof(response)));assert(strstr(response,"\"connected\":true"));assert(strstr(response,"\"image_path\":\"\""));
