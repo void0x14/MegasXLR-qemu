@@ -57,14 +57,16 @@ $(BUILD)/test-guest: tests/test_guest.c src/guest.c src/platform.c $(wildcard sr
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -pthread -o "$@" tests/test_guest.c src/guest.c src/platform.c $(LDLIBS)
 test-guest: $(BUILD)/test-guest
 	"./$(BUILD)/test-guest"
-test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-live test-agent
+test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-live test-agent test-task-budget
 else
 test-engine test-guest:
 	@echo "SKIP: $@ uses POSIX-only test fixtures and is not run on Windows."
-test: test-rfb test-platform test-seed test-bundle test-live test-agent
+test: test-rfb test-platform test-seed test-bundle test-live test-agent test-task-budget
 endif
 test-bundle:
 	$(PYTHON) tests/test_bundle.py
+test-task-budget:
+	$(PYTHON) -m unittest discover -s tests -p 'test_task_budget.py'
 test-smoke test-live: headless
 	$(PYTHON) tests/test_live.py "$(BUILD)/megas-headless$(EXE)" --report "$(BUILD)/live-report.json"
 test-agent: headless
