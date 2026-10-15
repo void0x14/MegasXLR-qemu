@@ -57,7 +57,7 @@ def validate_matrix(document):
         require("postcondition_equals" in entry, "postcondition_equals required")
         command = entry.get("oracle_cmd")
         require(isinstance(command, list) and 1 <= len(command) <= 32 and
-                all(isinstance(arg, str) and arg and "\\x00" not in arg for arg in command),
+                all(isinstance(arg, str) and arg and chr(0) not in arg for arg in command),
                 "independent oracle_cmd argv is required")
         require(isinstance(entry.get("oracle_id"), str) and entry["oracle_id"],
                 "independent oracle_id required")
@@ -175,6 +175,7 @@ def check_entry(megas, entry):
                 changed.get("cause_action_id") == action_id and
                 pointer(changed, entry["postcondition_path"]) == entry["postcondition_equals"]):
             independent_oracle(entry)
+            require(time.monotonic() <= deadline, "task exceeded time budget including independent verification")
             return {"version": entry["version"], "passed": True,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "ts_packets_observed": packets, "revision": changed["revision"]}
