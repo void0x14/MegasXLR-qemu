@@ -268,13 +268,24 @@ corrected before support is claimed. The existing BIOS guest timing and
 controller latency checks above do not establish Android task-time compliance;
 no Android human-baseline measurements are present in this validation record.
 
-The machine-checkable report gate is implemented in `tests/check_task_budget.py`.
-Run `make test-task-budget` for its contract tests and
-`python3 tests/check_task_budget.py /path/to/android-task-report.json` to check a
-captured report. The report's `support_matrix` lists every profile and required
-scenario; the checker rejects missing scenarios and requires coverage of every
-Android API level from 14 through 37. Each scenario records its task and profile,
-API/image/ABI, host and VM configuration, starting state and task digests, oracle,
-human timing samples, the time the baseline was frozen, and all agent runs.
-Every agent run must start after the human baseline is frozen, pass its oracle,
-and finish no later than 300 seconds after the human median.
+The machine-checkable report gate is implemented in
+`tests/check_task_budget.py`. Run `make test-task-budget` for its contract
+tests and `python3 tests/check_task_budget.py /path/to/android-task-report.json`
+to check a captured report.
+
+The report lists the complete required profile and scenario matrix. Every
+scenario records Android API, image variant, guest ABI, application ABI,
+translation layer, host and VM configuration, starting state and task digests,
+oracle, human timing samples, the time the human baseline was frozen, and every
+agent run. The checker requires coverage of API levels 14 through 37. For APIs
+14–20 it requires both `armeabi-v7a` and `x86` application ABIs; for APIs
+21–37 it additionally requires `arm64-v8a` and `x86_64`. Each API/ABI pair
+must include a native run with matching guest and app ABIs and no translation
+layer. A run crossing CPU families must name its translation layer. See the
+[Android NDK ABI guide](https://developer.android.com/ndk/guides/abis) and
+[Android 5.0 release notes](https://developer.android.com/about/versions/lollipop)
+for the ABI families and 64-bit introduction.
+
+Every agent run must start after the human baseline is frozen, pass the
+independent task oracle, and finish no later than 300 seconds after that
+scenario's human median. One missed run fails the report.
