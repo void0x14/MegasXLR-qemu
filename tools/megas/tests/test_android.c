@@ -52,6 +52,8 @@ int main(void)
     assert(!e->status.owned_pid&&!e->cfg.android);
     assert(mg_engine_submit(e,"{\"action\":\"start\",\"cpus\":343}",response,sizeof(response)));
     assert(!e->status.owned_pid&&e->cfg.cpus==1);
+    assert(mg_engine_submit(e,"{\"action\":\"start\",\"disk_bus\":\"bad-bus\"}",response,sizeof(response)));
+    assert(!e->status.owned_pid&&!strcmp(e->cfg.disk_bus,"virtio"));
     snprintf(log,sizeof(log),"%s/limits.log",runtime);
     assert(mgp_spawn_vm(&child,argv,log,&limits,error,sizeof(error)));
     assert(!mgp_pid(&child)&&strstr(error,"No unbounded VM"));
