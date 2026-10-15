@@ -141,6 +141,41 @@ and regressing revisions invalidate handles. Completed/queued host timestamps,
 round-trip duration, event/rejection counters, stream age/bytes and disconnected
 slow-viewer counts are observable. They do not perform online model training.
 
+## Real Android 4–17 acceptance gate
+
+`tests/android_matrix.py` is an executable **fail-closed** qualification gate.
+It takes one user-owned, already running native Megas Android session per major
+release 4 through 17. The sessions and their source images must be real; no
+synthetic provider fixture contributes a passing major release. Run from the
+local owner computer:
+
+```sh
+python3 tools/megas/tests/android_matrix.py --megas tools/megas/build/megas-headless --matrix /private/local/android-matrix.json
+```
+
+The private JSON is deliberately not committed. It contains a `devices` array
+with **exactly fourteen** objects, with integer `version` from 4 to 17 and
+`runtime_dir`, `control_port`, `stream_port`, provider-issued `target`,
+`operation`, `version_path`, `postcondition_path` and
+`postcondition_equals`. The two paths are JSON pointers into the provider's
+observed state; this public repository neither specifies nor stores the
+private accessibility-tree layout. `set_text` additionally requires `text`.
+An optional `max_seconds` is capped at 180.
+
+Each real session must provide its own observed Android major-version field,
+current semantic target capability, authenticated continuous MPEG-TS packets,
+a queued action that the guest reports as applied, a newer state reporting
+that action's ID, and a postcondition that was false before and true after.
+The entire test set fails if **any** release lacks evidence. The host does
+not equate a producer's version string with independent OS attestation; image
+provenance and actual decoded-video verification still require separate checks.
+This gate never reads boot logs, uses ADB, takes PNGs or estimates coordinates.
+It cannot certify unprovided devices, ARM apps, Play Store, or timing against
+human baselines.
+
+`make test-android-matrix-contract` tests this gate's shape and failure
+conditions on CI without simulating Android compatibility success.
+
 ## Validation and remaining work
 
 `make test-stream` checks authenticated HTTP, source availability, fragmented
