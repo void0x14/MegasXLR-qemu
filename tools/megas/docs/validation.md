@@ -267,3 +267,14 @@ to it passes this gate. A miss means the design or implementation must be
 corrected before support is claimed. The existing BIOS guest timing and
 controller latency checks above do not establish Android task-time compliance;
 no Android human-baseline measurements are present in this validation record.
+
+The machine-checkable report gate is implemented in `tests/check_task_budget.py`.
+Run `make test-task-budget` for its contract tests and
+`python3 tests/check_task_budget.py /path/to/android-task-report.json` to check a
+captured report. The report's `support_matrix` lists every profile and required
+scenario; the checker rejects missing scenarios and requires coverage of every
+Android API level from 14 through 37. Each scenario records its task and profile,
+API/image/ABI, host and VM configuration, starting state and task digests, oracle,
+human timing samples, the time the baseline was frozen, and all agent runs.
+Every agent run must start after the human baseline is frozen, pass its oracle,
+and finish no later than 300 seconds after the human median.
