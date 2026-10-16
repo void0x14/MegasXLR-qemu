@@ -63,11 +63,16 @@ typedef struct { uint64_t step, ms;
  } History;
 
 /* Cached public capabilities; the private accessibility tree stays outside. */
-enum { ANDROID_TARGET_MAX=256 };
+enum { ANDROID_TARGET_MAX=256, ANDROID_HISTORY_MAX=16 };
 typedef struct {
     char id[257];
     unsigned char allowed;
 } MgAndroidTarget;
+
+typedef struct {
+    uint64_t revision, guest_ms, host_ms, reported_cause;
+    unsigned targets;
+} MgAndroidEvent;
 
 typedef struct { MgpSocket socket;
  char request[REQUEST_CAP];
@@ -88,6 +93,8 @@ struct MgEngine {
     char android_outcome[32];
     MgAndroidTarget android_targets[ANDROID_TARGET_MAX];
     unsigned android_target_count;
+    MgAndroidEvent android_history[ANDROID_HISTORY_MAX];
+    unsigned android_history_count, android_history_next;
     uint64_t android_revision, android_received, android_generation;
     uint64_t android_action_id, android_pending, android_queued, android_completed;
     uint64_t android_events, android_rejected, resource_sample;
@@ -2206,6 +2213,7 @@ static void android_invalidate(MgEngine *e)
     e->android_state[0]=e->android_epoch[0]=0;
     memset(e->android_targets,0,sizeof(e->android_targets));
     e->android_target_count=0;
+    e->android_history_count=e->android_history_next=0;
     e->android_revision=e->android_received=0;
     e->android_guest_ms=e->android_guest_delta_ms=e->android_host_delta_ms=0;
     e->android_state_host_ms=e->android_cause_action_id=0;
@@ -2257,6 +2265,14 @@ static int android_tick_one(MgEngine *e)
         e->android_revision=revision;
         e->android_received=e->android_state_host_ms=mgp_now();
         e->android_events++;
+        {
+            MgAndroidEvent *event=&e->android_history[e->android_history_next];
+            event->revision=revision;event->guest_ms=guest_ms;
+            event->host_ms=e->android_state_host_ms;
+            event->reported_cause=cause;event->targets=e->android_target_count;
+            e->android_history_next=(e->android_history_next+1)%ANDROID_HISTORY_MAX;
+            if(e->android_history_count<ANDROID_HISTORY_MAX)e->android_history_count++;
+        }
         /* Private provider payloads are memory-only: never persist trees or text. */
     }else if(!strcmp(type,"heartbeat")){
         if(jstring(j,jget(j,0,"epoch"),epoch,sizeof(epoch))||strcmp(epoch,e->android_epoch)||
@@ -2374,6 +2390,19 @@ bstr(&b,e->status.phase);
           (unsigned long long)e->android_host_delta_ms,
           (unsigned long long)e->android_cause_action_id,
           (unsigned long long)e->android_revision_gaps);
+    bput(&b,",\"recent_state_events\":[");
+    for(i=0;i<e->android_history_count;i++){
+        const MgAndroidEvent *ev=&e->android_history[
+            (e->android_history_next+ANDROID_HISTORY_MAX-e->android_history_count+i)%ANDROID_HISTORY_MAX
+        ];
+        if(i)bput(&b,",");
+        bfmt(&b,"{\"revision\":%llu,\"guest_ms\":%llu,\"host_ms\":%llu,\"reported_cause_action_id\":%llu,\"target_count\":%u}",
+             (unsigned long long)ev->revision,
+             (unsigned long long)ev->guest_ms,
+             (unsigned long long)ev->host_ms,
+             (unsigned long long)ev->reported_cause,ev->targets);
+    }
+    bput(&b,"]");
     bfmt(&b,"},\"livestream\":{\"available\":%s,\"transport\":\"mpegts-http\",\"url\":\"http://127.0.0.1:%u/live.ts\",\"authorization\":\"Bearer session credential; never put it in a URL\",\"bytes_relayed\":%llu,\"source_age_ms\":%llu,\"slow_clients_disconnected\":%llu},\"ocr\":{\"status\":",
           mg_live_video_up(e->live)?"true":"false",e->cfg.stream_port,
           (unsigned long long)mg_live_bytes(e->live),(unsigned long long)mg_live_video_age(e->live),
