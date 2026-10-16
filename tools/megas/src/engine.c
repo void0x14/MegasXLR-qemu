@@ -1736,6 +1736,19 @@ static void ocr_tick(MgEngine *e)
         (unsigned long long)e->ocr_peak_memory); journal(e, "ocr_complete", detail); }
     feedback(e, "%s", e->ocr_message);
 }
+/* A renamed qcow2 must not be dispatched to QEMU as raw storage.
+ * No format guessing from the ISO filename or from a file extension alone. */
+static int disk_qcow2_magic(const char *path)
+{
+    static const unsigned char signature[4]={0x51,0x46,0x49,0xfb};
+    unsigned char header[4];
+    FILE *file=mgp_fopen(path,"rb");
+    size_t n;
+    if(!file)return -1;
+    n=fread(header,1,sizeof(header),file);
+    fclose(file);
+    return n==sizeof(header)&&!memcmp(header,signature,sizeof(signature));
+}
 static int vm_start(MgEngine *e,Json *j) {
     char qmp[128],vnc[128],qga[160],memory[32],video[128],disk[4096],cdrom[4096],seed_file[4096],seed_raw[512],seed_path[1024],username[33],password[257]="",bios[1024],error[512],data_dir[1024],helpers[1024];
 
@@ -1873,8 +1886,13 @@ argv[n++]="virtserialport,chardev=megas-qga,name=org.qemu.guest_agent.0";
     }
 
     if(e->cfg.disk[0]){
+        int signature=disk_qcow2_magic(e->cfg.disk);
+        if(signature<0){
+            feedback(e,"Configured disk cannot be opened; no VM was started.");
+            VM_START_FAIL();
+        }
         extension=strrchr(e->cfg.disk,'.');
-e->snapshot_supported=extension&&!strcmp(extension,".qcow2");
+        e->snapshot_supported=signature||(extension&&!strcmp(extension,".qcow2"));
 
         binit(&b,disk,sizeof(disk));
 bput(&b,"{\"driver\":");
@@ -1893,6 +1911,14 @@ argv[n++]=!strcmp(e->cfg.disk_bus,"ide")?"ide-hd,drive=megasdisk":"virtio-blk-pc
 
     }else e->snapshot_supported=0;
 
+    if(e->cfg.iso[0]){
+        FILE *image=mgp_fopen(e->cfg.iso,"rb");
+        if(!image){
+            feedback(e,"Configured ISO cannot be opened; no VM was started.");
+            VM_START_FAIL();
+        }
+        fclose(image);
+    }
     if(e->cfg.iso[0]){size_t i,used=0;
 for(i=0;e->cfg.iso[i]&&used+2<sizeof(cdrom);i++){cdrom[used++]=e->cfg.iso[i];
 if(e->cfg.iso[i]==',')cdrom[used++]=',';
