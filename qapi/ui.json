@@ -1434,6 +1434,8 @@
 # @port: TCP source port, bound to 127.0.0.1.  Required; 1..65535.
 #
 # @rendernode: DRM render node shared by the GPU and hardware encoder.
+#     If omitted, probe devices for direct import and hardware
+#     encoding.
 #
 # @fps: Maximum refresh rate, 1..60 (default: 30).
 #
@@ -1443,7 +1445,7 @@
 ##
 { 'struct': 'DisplayMegas',
   'if': 'CONFIG_MEGAS_STREAM',
-  'data': { 'port': 'uint16', 'rendernode': 'str',
+  'data': { 'port': 'uint16', '*rendernode': 'str',
             '*fps': 'uint8', '*bitrate': 'uint32' } }
 
 ##

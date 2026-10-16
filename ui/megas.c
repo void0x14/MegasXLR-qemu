@@ -14,6 +14,8 @@
 #include "ui/egl-context.h"
 #include "ui/egl-helpers.h"
 #include "megas-video.h"
+#include <poll.h>
+#include <xf86drm.h>
 
 #define INVALID_FENCE (-1)
 typedef struct MegasDisplay {
@@ -406,23 +408,138 @@ static const DisplayGLCtxOps megas_context_ops = {
     .dpy_gl_ctx_make_current = qemu_egl_make_context_current,
 };
 
-static void megas_early_init(DisplayOptions *options)
+static bool megas_probe_write(void *opaque, const uint8_t *data, size_t size)
+{
+    size_t *bytes = opaque;
+    *bytes += size;
+    return true;
+}
+
+/* Exercise the same allocation/import/encode path before choosing a device.
+ * No CPU image or vendor/model table participates in selection. */
+static bool megas_probe_device(const char *node, DisplayGLMode mode,
+                              char *reason, size_t capacity)
 {
     const char *renderer;
     g_autofree char *lower = NULL;
-    if (!options->has_gl || options->gl == DISPLAY_GL_MODE_OFF ||
-        !options->u.megas.rendernode) {
-        error_report("megas requires gl=on and an explicit DRM rendernode; no CPU-copy fallback");
-        exit(1);
+    Error *error = NULL;
+    MegasDmaFrame frame = { .width = 128, .height = 96,
+        .backing_width = 128, .backing_height = 96, .y0_top = true };
+    MegasVideo *encoder = NULL;
+    GLuint texture = 0, framebuffer = 0;
+    EGLint planes = 0;
+    size_t bytes = 0;
+    bool ok = false;
+
+    if (!egl_init(node, mode, &error)) {
+        snprintf(reason, capacity, "%s", error_get_pretty(error));
+        error_free(error);
+        goto out;
     }
-    egl_init(options->u.megas.rendernode, options->gl, &error_fatal);
-    eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, qemu_egl_rn_ctx);
     renderer = (const char *)glGetString(GL_RENDERER);
     lower = renderer ? g_ascii_strdown(renderer, -1) : NULL;
     if (!lower || strstr(lower, "llvmpipe") || strstr(lower, "softpipe") ||
         strstr(lower, "lavapipe") || strstr(lower, "swiftshader") ||
         strstr(lower, "software rasterizer")) {
-        error_report("megas: software GL renderer rejected; no CPU-copy fallback");
+        snprintf(reason, capacity, "software GL renderer rejected");
+        goto out;
+    }
+    if (!epoxy_has_egl_extension(qemu_egl_display,
+                                 "EGL_MESA_image_dma_buf_export")) {
+        snprintf(reason, capacity, "GPU texture DMA-BUF export unavailable");
+        goto out;
+    }
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.width, frame.height,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, texture, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        snprintf(reason, capacity, "GPU probe framebuffer unavailable");
+        goto out;
+    }
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glFinish(); /* one startup probe; normal streaming uses native fences */
+    if (!egl_dmabuf_export_texture(texture, frame.fd, (EGLint *)frame.offset,
+                                   (EGLint *)frame.stride,
+                                   (EGLint *)&frame.fourcc, &planes,
+                                   &frame.modifier)) {
+        snprintf(reason, capacity, "GPU probe DMA-BUF export failed");
+        goto out;
+    }
+    frame.planes = planes;
+    encoder = megas_video_new(&frame, 30, 500, node, reason, capacity);
+    if (!encoder || !megas_video_encode(encoder, &frame, 90000, true,
+                                        megas_probe_write, &bytes,
+                                        reason, capacity)) {
+        goto out;
+    }
+    ok = bytes > 0;
+    if (!ok) {
+        snprintf(reason, capacity, "GPU probe produced no encoded output");
+    }
+out:
+    megas_video_free(encoder);
+    frame_clear(&frame);
+    if (framebuffer) {
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDeleteFramebuffers(1, &framebuffer);
+    }
+    if (texture) {
+        glDeleteTextures(1, &texture);
+    }
+    if (!ok) {
+        egl_cleanup();
+    }
+    return ok;
+}
+
+static void megas_early_init(DisplayOptions *options)
+{
+    DisplayMegas *config = &options->u.megas;
+    g_autofree drmDevicePtr *devices = NULL;
+    char reason[512] = "no accessible DRM render device";
+    int count, i;
+    bool found = false;
+
+    if (!options->has_gl || options->gl == DISPLAY_GL_MODE_OFF) {
+        error_report("megas requires gl=on; no CPU-copy fallback");
+        exit(1);
+    }
+    if (config->has_rendernode && config->rendernode[0]) {
+        found = megas_probe_device(config->rendernode, options->gl,
+                                   reason, sizeof(reason));
+    } else {
+        count = drmGetDevices2(0, NULL, 0);
+        if (count > 0) {
+            devices = g_new0(drmDevicePtr, count);
+            count = drmGetDevices2(0, devices, count);
+        }
+        for (i = 0; i < count; i++) {
+            const char *node;
+            if (!(devices[i]->available_nodes & (1 << DRM_NODE_RENDER))) {
+                continue;
+            }
+            node = devices[i]->nodes[DRM_NODE_RENDER];
+            if (megas_probe_device(node, options->gl, reason, sizeof(reason))) {
+                g_free(config->rendernode);
+                config->rendernode = g_strdup(node);
+                config->has_rendernode = true;
+                found = true;
+                break;
+            }
+        }
+        if (count > 0) {
+            drmFreeDevices(devices, count);
+        }
+    }
+    if (!found) {
+        error_report("megas: no usable GPU render/import/encode path: %s; "
+                     "no CPU-copy fallback", reason);
         exit(1);
     }
 }

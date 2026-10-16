@@ -756,7 +756,7 @@ static void gui_settings(MgGui *ui)
     nk_checkbox_label(ctx,tr("Android: yerel sağlayıcı ve canlı yayın", "Android: local provider and livestream"),&ui->android);
     if(ui->android){
         nk_layout_row_dynamic(ctx,ui->row,1);
-        nk_label(ctx,tr("GPU aygıtı", "GPU device"),NK_TEXT_LEFT);
+        nk_label(ctx,tr("GPU seçimi: boş bırakılırsa otomatik", "GPU override: empty selects automatically"),NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx,ui->row,1);
         gui_edit(ui,8,ui->rendernode,sizeof(ui->rendernode));
         nk_layout_row_dynamic(ctx,ui->row,2);

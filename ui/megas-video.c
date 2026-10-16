@@ -281,6 +281,10 @@ MegasVideo *megas_video_new(const MegasDmaFrame *input, unsigned fps,
     v->encoder->rc_max_rate = bitrate * 1000;
     v->encoder->rc_buffer_size = bitrate * 500;
     v->encoder->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    if (!av_buffersink_get_hw_frames_ctx(v->sink)) {
+        result = AVERROR(EINVAL);
+        goto fail;
+    }
     v->encoder->hw_frames_ctx = av_buffer_ref(av_buffersink_get_hw_frames_ctx(v->sink));
     if (!v->encoder->hw_frames_ctx) {
         result = AVERROR(ENOMEM);

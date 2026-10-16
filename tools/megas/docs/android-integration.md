@@ -7,8 +7,15 @@ local build recipe are not in this repository, its tests, CI or packages.
 
 ## GPU video path under development
 
-Android launch uses the fork's GPU display backend with an explicit render node:
-`-display megas,gl=on,rendernode=/dev/dri/renderD128,port=49396,fps=30,bitrate=1500`.
+Android launch uses `-display megas,gl=on,port=49396,fps=30,bitrate=1500`.
+At startup, DRM devices are enumerated instead of assuming a particular render
+node number or GPU model. Each candidate must initialize hardware GL, export a
+GPU allocation as DMA-BUF, directly import it and produce hardware H.264 output.
+The first working device is shared by rendering and encoding. Failed candidates
+are released before trying the next. An optional `rendernode`/`MEGAS_RENDER_NODE`
+override pins one device and fails explicitly if its probe fails. This small
+startup probe does not qualify guest graphics formats, image correctness or
+performance.
 The listener exports GL scanout as DMA-BUF descriptors; existing DMA-BUF scanout
 can also be referenced directly. It has no raw pixel pointer, shadow framebuffer,
 CPU pixel copy, `glReadPixels`, RGB-to-YUV CPU conversion or software encoder.
@@ -49,7 +56,7 @@ The current launch device model is an **x86 PC**. The GPU device is currently `v
 Android graphics drivers, an ARM Android board or Google's goldfish/ranchu model. Suitable locally prepared x86 images can use:
 
 ```json
-{"action":"start","android":true,"disk":"/local/android.qcow2","ram_mb":2048,"accel":"kvm","rendernode":"/dev/dri/renderD128","cpus":1,"cpu_percent":100,"max_threads":48}
+{"action":"start","android":true,"disk":"/local/android.qcow2","ram_mb":2048,"accel":"kvm","cpus":1,"cpu_percent":100,"max_threads":48}
 ```
 
 The GUI exposes the same Android switch and CPU budget. It does not download an

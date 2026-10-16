@@ -667,7 +667,7 @@ return -1;
 
 }
 static int connect_qmp(MgEngine *e) {
-    uint64_t deadline=mgp_now()+COMMAND_MS;
+    uint64_t deadline=mgp_now()+COMMAND_MS, now;
 
     while(mgp_now()<deadline){e->qmp=mgp_connect(e->cfg.qmp_port,100);
 if(e->qmp!=MGP_BAD_SOCKET)break;
@@ -685,7 +685,9 @@ e->late_id=0;
 if(e->qmp==MGP_BAD_SOCKET)break;
 mgp_ready(e->qmp,0,10);
 }
-    if(!e->qmp_greeting||qmp_exec(e,"qmp_capabilities",NULL,500)){qmp_disconnect(e);
+    now=mgp_now();
+    if(!e->qmp_greeting||now>=deadline||
+       qmp_exec(e,"qmp_capabilities",NULL,(unsigned)(deadline-now))){qmp_disconnect(e);
 return -1;
 }
     e->status.connected=1;
@@ -1261,7 +1263,7 @@ cfg->stream_port=49397;
 cfg->cpus=1;
 cfg->cpu_percent=100;
 cfg->max_threads=48;
-snprintf(cfg->rendernode,sizeof(cfg->rendernode),"/dev/dri/renderD128");
+cfg->rendernode[0]=0; /* Empty selects a probed render/import/encode device. */
 if(!mgp_env("MEGAS_RENDER_NODE",env,sizeof(env)))snprintf(cfg->rendernode,sizeof(cfg->rendernode),"%.63s",env);
 snprintf(cfg->accel,sizeof(cfg->accel),"auto");
 if(!mgp_env("MEGAS_CGROUP_PARENT",env,sizeof(env)))snprintf(cfg->cgroup_parent,sizeof(cfg->cgroup_parent),"%s",env);
@@ -1807,8 +1809,8 @@ snprintf(vnc,sizeof(vnc),"127.0.0.1:%u",e->cfg.vnc_port-5900);
 snprintf(video,sizeof(video),"virtio-vga,xres=%u,yres=%u",e->cfg.width,e->cfg.height);
 if(e->cfg.android){
     size_t i;
-    if(strncmp(e->cfg.rendernode,"/dev/dri/renderD",16)||!e->cfg.rendernode[16]){feedback(e,"Choose an explicit GPU DRM render node, for example /dev/dri/renderD128.");VM_START_FAIL();}
-    for(i=16;e->cfg.rendernode[i];i++)if(!isdigit((unsigned char)e->cfg.rendernode[i])){feedback(e,"DRM render node must use its /dev/dri/renderD<number> path.");VM_START_FAIL();}
+    if(e->cfg.rendernode[0]&&(strncmp(e->cfg.rendernode,"/dev/dri/renderD",16)||!e->cfg.rendernode[16])){feedback(e,"Leave the GPU override empty for automatic selection, or use /dev/dri/renderD<number>.");VM_START_FAIL();}
+    for(i=16;e->cfg.rendernode[0]&&e->cfg.rendernode[i];i++)if(!isdigit((unsigned char)e->cfg.rendernode[i])){feedback(e,"DRM render node must use its /dev/dri/renderD<number> path.");VM_START_FAIL();}
     snprintf(video,sizeof(video),"virtio-vga-gl,xres=%u,yres=%u",e->cfg.width,e->cfg.height);
 }
 
@@ -1825,7 +1827,7 @@ if(!e->cfg.android){argv[n++]="-vnc";argv[n++]=vnc;}
 
     argv[n++]="-display";
 if(e->cfg.android){
-    snprintf(native_display,sizeof(native_display),"megas,gl=on,rendernode=%s,port=%u,fps=30,bitrate=1500",e->cfg.rendernode,e->cfg.video_port);
+    snprintf(native_display,sizeof(native_display),"megas,gl=on,port=%u,fps=30,bitrate=1500%s%s",e->cfg.video_port,e->cfg.rendernode[0]?",rendernode=":"",e->cfg.rendernode);
     argv[n++]=native_display;
 }else argv[n++]="none";
 argv[n++]="-device";
