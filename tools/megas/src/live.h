@@ -15,6 +15,10 @@ void mg_live_tick(MgLive *);
 /* Returned line is borrowed until the next tick. Empty means no new message. */
 const char *mg_live_line(MgLive *);
 int mg_live_send(MgLive *, const char *line);
+/* Publish metadata-only, authenticated server-sent events; never private
+ * accessibility payloads. All operations run on the existing owner thread. */
+void mg_live_event(MgLive *, const char *type, uint64_t revision);
+
 void mg_live_abort_control(MgLive *);
 int mg_live_control_up(MgLive *);
 int mg_live_video_up(MgLive *);
