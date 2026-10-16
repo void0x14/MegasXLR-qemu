@@ -92,6 +92,16 @@ class StreamTests(unittest.TestCase):
         self.video.shutdown(socket.SHUT_WR)
         self.assertEqual(client.recv(1), b'')
 
+    def test_stalled_source_invalidates_existing_and_new_viewers(self):
+        self.ready()
+        client, header, _ = self.request()
+        self.assertIn(b'200 OK', header)
+        # Producer TCP connection stays up, but no encoded stream arrives.
+        time.sleep(2.2)
+        self.assertEqual(client.recv(1), b'')
+        _, header, _ = self.request()
+        self.assertIn(b'503 Service Unavailable', header)
+
     def test_malformed_transport_closes_without_png_fallback(self):
         self.ready()
         client, _, _ = self.request()

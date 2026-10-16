@@ -6,6 +6,7 @@ import copy
 import contextlib
 import io
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ import unittest
 from check_task_budget import main, validate_report
 
 
-def valid_report(agent_seconds=410.0, oracle_result="pass"):
+def valid_report(agent_seconds=180.0, oracle_result="pass"):
     report = {
         "schema_version": 1,
         "support_matrix": [],
@@ -49,7 +50,7 @@ def valid_report(agent_seconds=410.0, oracle_result="pass"):
                 "agent_runs": [{
                     "run_id": f"agent-api{api}-{app_abi}",
                     "started_at_utc": "2026-10-15T12:00:00Z",
-                    "finished_at_utc": "2026-10-15T12:06:50Z",
+                    "finished_at_utc": (datetime(2026, 10, 15, 12, tzinfo=timezone.utc) + timedelta(seconds=agent_seconds)).isoformat(),
                     "elapsed_seconds": agent_seconds,
                     "oracle_result": oracle_result,
                     "failure_reason": "target did not verify" if oracle_result != "pass" else "",
@@ -59,16 +60,26 @@ def valid_report(agent_seconds=410.0, oracle_result="pass"):
 
 
 class TaskBudgetTests(unittest.TestCase):
-    def test_exactly_five_minutes_over_human_median_passes(self):
+    def test_three_minute_ceiling_passes(self):
         errors, results = validate_report(valid_report())
         self.assertEqual(errors, [])
         self.assertTrue(results[0]["passed"])
         self.assertEqual(results[0]["human_median_seconds"], 110)
+        self.assertEqual(results[0]["allowed_seconds"], 180)
 
-    def test_one_millisecond_over_five_minute_budget_fails(self):
-        errors, results = validate_report(valid_report(agent_seconds=410.001))
+    def test_one_millisecond_over_three_minute_ceiling_fails(self):
+        errors, results = validate_report(valid_report(agent_seconds=180.001))
         self.assertEqual(errors, [])
         self.assertTrue(any(not result["passed"] for result in results))
+
+    def test_elapsed_measurement_must_match_utc_clock(self):
+        report = valid_report()
+        report["scenarios"][0]["agent_runs"][0]["finished_at_utc"] = "2026-10-15T12:00:02Z"
+        errors, results = validate_report(report)
+        self.assertEqual(errors, [])
+        self.assertFalse(results[0]["passed"])
+        self.assertTrue(any("differs from independent UTC timestamps" in error
+                            for error in results[0]["agent_runs"][0]["errors"]))
 
     def test_fast_but_unverified_result_fails(self):
         errors, results = validate_report(valid_report(agent_seconds=90, oracle_result="fail"))
@@ -159,12 +170,12 @@ class TaskBudgetTests(unittest.TestCase):
     def test_cli_rejects_a_slow_report(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.json"
-            path.write_text(json.dumps(valid_report(agent_seconds=411)), encoding="utf-8")
+            path.write_text(json.dumps(valid_report(agent_seconds=181)), encoding="utf-8")
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 result = main([str(path)])
         self.assertEqual(result, 1)
-        self.assertIn("agent exceeded human median", output.getvalue())
+        self.assertIn("agent exceeded 180s hard task limit", output.getvalue())
 
 
 if __name__ == "__main__":

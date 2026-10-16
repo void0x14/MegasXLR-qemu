@@ -47,7 +47,7 @@ typedef struct {
     int width, height, alive, focused, tab, settings_tab, advanced_settings, res_selected;
     int ram, vm_w, vm_h, passwordless, disk_gb, create_dialog, creating_disk;
     int password_field_visible;
-    int android, cpus, cpu_percent;
+    int android, cpus, cpu_percent, android_ide, android_boot_iso;
     float row;
     char qemu[1024], disk[1024], iso[1024], checkpoint[64];
     char rendernode[1024];
@@ -208,8 +208,8 @@ static void gui_start(MgGui *ui)
             gui_note(ui,tr("GPU aygıt yolu çok uzun.","GPU device path is too long."));return;
         }
         snprintf(request,sizeof(request),
-                 "{\"action\":\"start\",\"android\":true,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"rendernode\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"cpus\":%d,\"cpu_percent\":%d}",
-                 qemu,disk,iso,rendernode,ui->ram,ui->vm_w,ui->vm_h,ui->cpus,ui->cpu_percent);
+                 "{\"action\":\"start\",\"android\":true,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"rendernode\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"cpus\":%d,\"cpu_percent\":%d,\"disk_bus\":\"%s\",\"video_adapter\":\"virtio\",\"boot_source\":\"%s\"}",
+                 qemu,disk,iso,rendernode,ui->ram,ui->vm_w,ui->vm_h,ui->cpus,ui->cpu_percent,ui->android_ide?"ide":"virtio",ui->android_boot_iso?"iso":"auto");
         gui_queue(ui,request);gui_wipe(request,sizeof(request));return;
     }
     if (!ui->passwordless && ui->password[0] &&
@@ -762,6 +762,10 @@ static void gui_settings(MgGui *ui)
         nk_layout_row_dynamic(ctx,ui->row,2);
         nk_property_int(ctx,"vCPU",1,&ui->cpus,4,1,1);
         nk_property_int(ctx,tr("CPU bütçesi %", "CPU budget %"),1,&ui->cpu_percent,400,10,1);
+        nk_layout_row_dynamic(ctx,ui->row,1);
+        nk_checkbox_label(ctx,tr("Eski Android imajları için IDE disk", "IDE disk for legacy Android images"),&ui->android_ide);
+        nk_layout_row_dynamic(ctx,ui->row,1);
+        nk_checkbox_label(ctx,tr("Kurulum ISO'sundan bir defa aç", "Boot installer ISO once"),&ui->android_boot_iso);
         nk_layout_row_dynamic(ctx,ui->row*3,1);
         nk_label_wrap(ctx,tr("Yerel Android sağlayıcısı, donanım hızlandırması ve ayrılmış kaynak sınırları gerekir. Bu seçenek Android imajı veya Google uygulaması indirmez.",
                              "Requires a local Android provider, hardware acceleration and delegated resource limits. This option does not download Android images or Google apps."));
@@ -1041,6 +1045,17 @@ static void gui_draw(MgGui *ui)
                  s->qemu_threads,(double)s->qemu_memory_bytes/(1024*1024),s->android_ready?"ready":"-",s->video_ready?"live":"-",
                  ui->feedback[0] ? ui->feedback : s->feedback);
         nk_label_wrap(ctx,line);
+        if(s->pressure_available){
+            nk_layout_row_dynamic(ctx,ui->row*1.5f,1);
+            snprintf(line,sizeof(line),
+                     "Kernel: %llu/%u tasks · %llu PID-limit hits · %.1f s CPU throttled · %llu OOM kills",
+                     (unsigned long long)s->tasks_current,
+                     mg_engine_config(ui->engine)->max_threads,
+                     (unsigned long long)s->task_limit_hits,
+                     (double)s->cpu_throttled_usec/1000000.0,
+                     (unsigned long long)s->oom_kills);
+            nk_label_wrap(ctx,line);
+        }
         if (ui->width >= 960) {
             nk_layout_row_begin(ctx,NK_STATIC,body,2);
             nk_layout_row_push(ctx,(float)ui->width-390);
@@ -1503,6 +1518,8 @@ int mg_gui_run(MgEngine *engine)
     snprintf(ui->checkpoint,sizeof(ui->checkpoint),"step-1");
     ui->ram=(int)config->ram_mb;ui->vm_w=(int)config->width;ui->vm_h=(int)config->height;
     ui->android=config->android;ui->cpus=(int)config->cpus;ui->cpu_percent=(int)config->cpu_percent;
+    ui->android_ide=!strcmp(config->disk_bus,"ide");
+    ui->android_boot_iso=!strcmp(config->boot_source,"iso");
     ui->passwordless=config->passwordless;ui->disk_gb=16;
     for (int i = 1; i < RES_PRESETS_COUNT; ++i) {
         if (res_presets[i].w == ui->vm_w && res_presets[i].h == ui->vm_h) {

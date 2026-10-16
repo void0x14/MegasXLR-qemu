@@ -20,12 +20,11 @@ static unsigned unused_port(void)
 }
 static void feed(MgEngine *e,MgpSocket peer,const char *line)
 {
-    uint64_t deadline=mgp_now()+1000;
-    size_t length=strlen(line)-1;
+    uint64_t deadline=mgp_now()+1000, before=e->android_messages;
     assert(!mgp_send_all(peer,line,strlen(line),100));
     do {
         android_tick(e);
-        if(strlen(mg_live_line(e->live))==length&&!memcmp(mg_live_line(e->live),line,length))return;
+        if(e->android_messages>before)return;
         mgp_sleep(1);
     }while(mgp_now()<deadline);
     assert(!"provider message was not consumed");
@@ -52,6 +51,8 @@ int main(void)
     assert(!e->status.owned_pid&&!e->cfg.android);
     assert(mg_engine_submit(e,"{\"action\":\"start\",\"cpus\":343}",response,sizeof(response)));
     assert(!e->status.owned_pid&&e->cfg.cpus==1);
+    assert(mg_engine_submit(e,"{\"action\":\"start\",\"disk_bus\":\"bad-bus\"}",response,sizeof(response)));
+    assert(!e->status.owned_pid&&!strcmp(e->cfg.disk_bus,"virtio"));
     snprintf(log,sizeof(log),"%s/limits.log",runtime);
     assert(mgp_spawn_vm(&child,argv,log,&limits,error,sizeof(error)));
     assert(!mgp_pid(&child)&&strstr(error,"No unbounded VM"));
@@ -68,9 +69,14 @@ int main(void)
     memset(ts,0xff,sizeof(ts));ts[0]=0x47;ts[1]=0x1f;ts[2]=0xff;ts[3]=0x10;
     assert(!mgp_send_all(video,ts,sizeof(ts),100));android_tick(e);
     assert(mg_live_video_up(e->live));
-    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":1,\"guest_monotonic_ms\":100,\"cause_action_id\":0,\"payload\":{\"private_test_marker\":true}}\n");
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"duplicate\",\"revision\":1,\"guest_monotonic_ms\":5,\"cause_action_id\":0,\"targets\":[{\"id\":\"same\",\"operations\":[\"click\"]},{\"id\":\"same\",\"operations\":[\"set_text\"]}],\"payload\":{}}\n");
+    assert(!e->android_revision && !e->android_target_count);
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"unknown-action\",\"revision\":1,\"guest_monotonic_ms\":5,\"cause_action_id\":0,\"targets\":[{\"id\":\"node\",\"operations\":[\"raw_tap_coordinate\"]}],\"payload\":{}}\n");
+    assert(!e->android_revision && !e->android_target_count);
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":1,\"guest_monotonic_ms\":100,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\",\"set_text\"]},{\"id\":\"n2\",\"operations\":[\"click\"]},{\"id\":\"private_target_marker\",\"operations\":[\"set_text\"]}],\"payload\":{\"private_test_marker\":true}}\n");
     assert(e->android_revision==1);
     assert(!mg_engine_submit(e,"{\"action\":\"android_observe\"}",response,sizeof(response)));
+    assert(strstr(response,"\"state_metrics\"")&&strstr(response,"\"reported_cause_action_id\":0")&&strstr(response,"\"cause_trust\":\"guest_report_not_verified\""));
     assert(strstr(response,"private_test_marker")&&strstr(response,"\"image_path\":\"\""));
     {MgpSocket unauthorized=mgp_connect(cfg.control_port,100);
      const char *request="{\"action\":\"status\",\"auth\":\"wrong\"}\n";
@@ -83,6 +89,8 @@ int main(void)
     assert(mg_engine_submit(e,"{\"action\":\"android_act\",\"epoch\":\"boot-a\",\"expected_revision\":1,\"target\":\"n1\",\"operation\":\"click\",\"x\":50}",response,sizeof(response)));
     assert(mg_engine_submit(e,"{\"action\":\"click\",\"x\":50,\"y\":50}",response,sizeof(response)));
     assert(mg_engine_submit(e,"{\"action\":\"type\",\"text\":\"raw input\"}",response,sizeof(response)));
+    assert(mg_engine_submit(e,"{\"action\":\"android_act\",\"epoch\":\"boot-a\",\"expected_revision\":1,\"target\":\"guessed\",\"operation\":\"click\"}",response,sizeof(response)));
+    assert(mg_engine_submit(e,"{\"action\":\"android_act\",\"epoch\":\"boot-a\",\"expected_revision\":1,\"target\":\"n2\",\"operation\":\"set_text\"}",response,sizeof(response)));
     assert(!mg_engine_submit(e,"{\"action\":\"ANDROID_ACT\",\"epoch\":\"boot-a\",\"expected_revision\":1,\"target\":\"private_target_marker\",\"operation\":\"set_text\",\"text\":\"private_text_marker\"}",response,sizeof(response)));
     assert(e->android_pending==1&&strstr(response,"\"outcome\":\"queued\""));
     android_tick(e);
@@ -107,12 +115,27 @@ int main(void)
      do{android_tick(e);mgp_sleep(1);}while(!mg_live_control_up(e->live)&&mgp_now()<deadline);
      assert(mg_live_control_up(e->live));
      peer=accept(control_server,NULL,NULL);assert(peer!=MGP_BAD_SOCKET);}
-    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":3,\"guest_monotonic_ms\":150,\"cause_action_id\":2,\"payload\":{}}\n");
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":3,\"guest_monotonic_ms\":150,\"cause_action_id\":2,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
     assert(e->android_revision==3);
-    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":2,\"guest_monotonic_ms\":140,\"cause_action_id\":0,\"payload\":{}}\n");
+    assert(e->android_guest_ms==150);
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":5,\"guest_monotonic_ms\":180,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
+    assert(e->android_revision==5&&e->android_revision_gaps>=1);
+    assert(e->android_guest_delta_ms==30);
+    {
+        /* Both events arrive in the same socket write. They must be visible
+         * after a single host tick, not after two GUI/agent round trips. */
+        const char *burst="{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":6,\"guest_monotonic_ms\":190,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n"
+            "{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":7,\"guest_monotonic_ms\":200,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n";
+        assert(!mgp_send_all(peer,burst,strlen(burst),100));
+        mgp_sleep(10); /* allow the peer write to reach the owner socket */
+        android_tick(e);
+        assert(e->android_revision==7);
+        assert(e->android_guest_ms==200);
+    }
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":2,\"guest_monotonic_ms\":140,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\",\"set_text\"]},{\"id\":\"n2\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
     assert(!e->android_revision);
     puts("android: heartbeat, timeout, no blind replay, explicit uncertainty acknowledgement, stale events invalidate handles");
-    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-b\",\"revision\":1,\"guest_monotonic_ms\":10,\"cause_action_id\":0,\"payload\":{}}\n");
+    feed(e,peer,"{\"type\":\"state\",\"epoch\":\"boot-b\",\"revision\":1,\"guest_monotonic_ms\":10,\"cause_action_id\":0,\"targets\":[{\"id\":\"n3\",\"operations\":[\"click\"]}],\"payload\":{}}\n");
     assert(!mg_engine_submit(e,"{\"action\":\"android_act\",\"epoch\":\"boot-b\",\"expected_revision\":1,\"target\":\"n3\",\"operation\":\"click\"}",response,sizeof(response)));
     android_tick(e);n=recv(peer,wire,sizeof(wire),0);assert(n>0);
     mgp_close(peer);android_tick(e);

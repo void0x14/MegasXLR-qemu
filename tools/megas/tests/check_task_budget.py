@@ -11,7 +11,8 @@ import sys
 from datetime import datetime
 
 
-LIMIT_SECONDS = 300.0
+HUMAN_SLACK_SECONDS = 300.0
+MAX_TASK_SECONDS = 180.0
 ANDROID_API_LEVELS = set(range(14, 38))
 APP_ABIS_32_BIT = {"armeabi-v7a", "x86"}
 APP_ABIS_64_BIT = {"arm64-v8a", "x86_64"}
@@ -187,7 +188,7 @@ def validate_report(report):
 
         run_results = []
         if human_median is not None:
-            allowed = human_median + LIMIT_SECONDS
+            allowed = min(human_median + HUMAN_SLACK_SECONDS, MAX_TASK_SECONDS)
             for index, run in enumerate(agent_runs, 1):
                 run_errors = []
                 if not isinstance(run, dict):
@@ -207,14 +208,19 @@ def validate_report(report):
                     run_errors.append("finished_at_utc precedes started_at_utc")
                 elif frozen is not None and started < frozen:
                     run_errors.append("agent run started before the human baseline was frozen")
+                if started is not None and finished is not None and _positive_number(elapsed):
+                    if abs((finished - started).total_seconds() - elapsed) > 1.0:
+                        run_errors.append("reported elapsed time differs from independent UTC timestamps")
                 if run.get("oracle_result") != "pass":
                     detail = run.get("failure_reason")
                     run_errors.append("independent task oracle did not pass" +
                                       (": " + detail if _text(detail) else ""))
-                if _positive_number(elapsed) and elapsed > allowed:
+                if _positive_number(elapsed) and elapsed > MAX_TASK_SECONDS:
+                    run_errors.append(f"agent exceeded {MAX_TASK_SECONDS:.0f}s hard task limit")
+                if _positive_number(elapsed) and elapsed > human_median + HUMAN_SLACK_SECONDS:
                     run_errors.append(
                         "agent exceeded human median by "
-                        f"{elapsed - human_median:.3f}s; maximum is {LIMIT_SECONDS:.0f}s"
+                        f"{elapsed - human_median:.3f}s; maximum overhead is {HUMAN_SLACK_SECONDS:.0f}s"
                     )
                 run_results.append({
                     "run": run.get("run_id", index),
@@ -231,7 +237,7 @@ def validate_report(report):
             "scenario_id": scenario_id,
             "profile_id": expected[scenario_id],
             "human_median_seconds": human_median,
-            "allowed_seconds": human_median + LIMIT_SECONDS if human_median is not None else None,
+            "allowed_seconds": min(human_median + HUMAN_SLACK_SECONDS, MAX_TASK_SECONDS) if human_median is not None else None,
             "passed": scenario_passed,
             "errors": scenario_errors,
             "agent_runs": run_results,

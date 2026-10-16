@@ -46,7 +46,8 @@ encoded stream are still required; returning a stream URL does not itself make
 a model watch live video. HLS playlists are not implemented.
 
 The controller relays 188-byte MPEG-TS packets on an authenticated loopback HTTP
-endpoint, accepts four viewers, and bounds pending encoded output to about
+endpoint, accepts four video viewers and four separate SSE subscribers, and
+bounds pending encoded output to about
 24 KiB per viewer. It does not take screenshots to produce video. Screenshots
 and OCR remain explicit optional operations where supported, not agent defaults.
 
@@ -55,11 +56,20 @@ and OCR remain explicit optional operations where supported, not agent defaults.
 The current launch device model is an **x86 PC**. The GPU device is currently `virtio-vga-gl`. This does not implement legacy
 Android graphics drivers, an ARM Android board or Google's goldfish/ranchu model. Suitable locally prepared x86 images can use:
 
+Locally supplied qcow2 disks are detected by their QFI signature even when
+renamed. Unreadable disk and ISO paths fail before VM launch.
+
 ```json
 {"action":"start","android":true,"disk":"/local/android.qcow2","ram_mb":2048,"accel":"kvm","cpus":1,"cpu_percent":100,"max_threads":48}
 ```
 
-The GUI exposes the same Android switch and CPU budget. It does not download an
+The GUI exposes the same Android switch and CPU budget. The installer ISO
+checkbox requests `boot_source:"iso"`: with an existing disk, QEMU boots
+the ISO **once** and returns to the disk on reboot. `boot_source:"disk"`
+explicitly boots the disk; `auto` preserves QEMU's default. An ISO must
+be configured before ISO boot, and a disk before disk boot. This selects the
+device, not an OS installation procedure; modified images still require
+compatible kernel, bootloader and hardware drivers. A storage transport selector uses `virtio` by default or `ide` for legacy x86 images that do not expose virtio block devices. The `video_adapter` selector permits standard VGA for ordinary VMs. Android currently requires virtio GPU scanout; standard VGA is rejected before launch because its direct GPU streaming adapter is not implemented. These are hardware settings, not evidence that every Android major release boots. The selected disk transport is passed as an explicit QEMU device, not a post-boot patch. It does not guarantee that a given image contains the required kernel, partition or graphics support. It does not download an
 image or install a provider. There is no Android SDK process in this host path.
 Android skips Linux NoCloud account creation and QGA login-policy retries.
 Automatic full RAM/disk checkpoints per input are disabled in Android mode;
@@ -105,6 +115,11 @@ They have no equivalent hard per-job thread limit in this implementation, so
 strict Android launch is rejected there. It is not advertised as completed
 Windows Android support. Thread count and memory usage are sampled at most
 twice a second and displayed in the command centre and `resources` response.
+When Linux delegated cgroup v2 is active, both samples now come directly from
+`pids.current` and `memory.current`, rather than enumerating host PIDs
+via `/proc`; memory is the **whole cgroup's** current usage and task count
+includes all processes and threads in the isolated VM. Otherwise, fallback
+sampling remains best-effort and cannot claim an enforced task limit.
 These are QEMU host threads, not guest Android application threads.
 
 ## Public transport boundary
@@ -124,19 +139,47 @@ The response's `livestream.available` requires recent valid TS bytes. Missing
 video returns 503, invalid authentication returns 403. The relay is deliberately
 small; its HTTP authentication header uses the documented spelling above.
 
+The host also exposes authenticated `GET /events` on the same loopback
+HTTP port, with `Content-Type: text/event-stream` (SSE). The guest's
+validated state transition emits `event: state`; guest-result processing emits
+`event: result`; reset/invalidation emits `event: reset`. The stream
+also emits `event: video` with value 1 when encoded packets resume and 0
+when the producer disconnects or stalls. OS-enforced cgroup events emit
+`event: resource` with numeric value `1` for a host task-limit hit and `2`
+for a contained kernel OOM kill. These events report actual kernel counters,
+not inferred Android UI state. Each event has
+a monotonically increasing connection-lifetime event ID and a payload with
+only a public numeric value and host monotonic timestamp. **The private
+accessibility tree, node identifiers, user text and screenshots are never
+put into SSE events.** Every new or reconnected SSE connection first receives `event: resync` so
+no missed events can silently be treated as a complete state history.
+Consumers must call `android_observe` to obtain fresh semantic state;
+the SSE message is not independent causality proof. The same existing bearer credential is required and must be sent as
+a header, never in a URL or repository file. Existing native owner loop
+services these connections without spawning a worker. Four clients per channel type (eight total) are allowed; slow subscribers
+are disconnected instead of retaining an unbounded backlog. Heartbeat
+comments keep idle event subscribers aware of the connection.
+
 The semantic provider is separate software built and installed on the user's
 computer. The public host treats its `payload` as opaque. It must emit:
 
 ```json
-{"type":"state","epoch":"boot-session-id","revision":1,"guest_monotonic_ms":100,"cause_action_id":0,"payload":{}}
+{"type":"state","epoch":"boot-session-id","revision":1,"guest_monotonic_ms":100,"cause_action_id":0,"targets":[{"id":"provider-issued-node-id","operations":["click","focus"]}],"payload":{}}
 ```
 
 This example defines only the public envelope. It contains no private tree
-representation. Revisions increase within an epoch. A bounded heartbeat may
+representation. The provider must include up to 256 `targets`, each with a stable
+nonempty `id` and the explicit `operations` currently permitted for that ID.
+The host rejects targets absent from its last observed revision, operations
+not advertised for that target, and malformed target envelopes. The provider
+must independently revalidate on execution; this check is not authority over
+private guest accessibility state. Revisions increase within an epoch. A bounded heartbeat may
 confirm an unchanged state using `type:heartbeat`, `epoch` and `revision`.
 `guest_monotonic_ms` and cause relationships are provider reports, not host
 clock synchronization or inferred proof of causality. State payloads remain in
 memory and are not written to the action journal.
+
+`android_observe` also reports measured host-to-host state-event intervals, guest-reported monotonic intervals, revision gaps and guest-declared action causes. Host and guest clocks are not synchronized; causes remain provider reports, never independently verified causal evidence. This telemetry is memory-only and never stores private tree contents in the journal.
 
 `android_observe` returns the latest state plus its host freshness, stream
 availability and action status. `android_act` accepts `epoch`,
@@ -202,3 +245,39 @@ thread isolation, and real application/human-time comparisons. The reported
 its resource usage has not been measured or corrected by these cloud tests.
 The private accessibility source and its build recipe must remain solely on
 that local PC and must not be placed in this public repository or cloud CI.
+
+## Real Android 4–17 acceptance gate
+
+`tests/android_matrix.py` is an executable **fail-closed** qualification gate.
+It takes one user-owned, already running native Megas Android session per major
+release 4 through 17. The sessions and their source images must be real; no
+synthetic provider fixture contributes a passing major release. Run from the
+local owner computer:
+
+```sh
+python3 tools/megas/tests/android_matrix.py --megas tools/megas/build/megas-headless --matrix /private/local/android-matrix.json
+```
+
+The private JSON is deliberately not committed. It contains a `devices` array
+with **exactly fourteen** objects, with integer `version` from 4 to 17 and
+`runtime_dir`, `control_port`, `stream_port`, provider-issued `target`,
+`operation`, `version_path`, `postcondition_path` and
+`postcondition_equals`, `oracle_cmd` (a list of local executable arguments), and `oracle_id`.
+The external judge must exit successfully and return JSON `{"oracle_id":"same-id","passed":true}` after the guest-reported state change. It must independently verify the actual app/task outcome rather than trust the guest provider or boot logs. The two paths are JSON pointers into the provider's
+observed state; this public repository neither specifies nor stores the
+private accessibility-tree layout. `set_text` additionally requires `text`.
+An optional `max_seconds` is capped at 180 including the independent oracle check.
+
+Each real session must provide its own observed Android major-version field,
+current semantic target capability, authenticated continuous MPEG-TS packets,
+a queued action that the guest reports as applied, a newer state reporting
+that action's ID, and a postcondition that was false before and true after.
+The entire test set fails if **any** release lacks evidence. The host does
+not equate a producer's version string with independent OS attestation; image
+provenance and actual decoded-video verification still require separate checks.
+This gate never reads boot logs, uses ADB, takes PNGs or estimates coordinates.
+It cannot certify unprovided devices, ARM apps, Play Store, or timing against
+human baselines.
+
+`make test-android-matrix-contract` tests this gate's shape and failure
+conditions on CI without simulating Android compatibility success.
