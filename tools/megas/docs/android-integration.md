@@ -19,7 +19,7 @@ idle display. The host has no video clock synchronization or glass-to-glass
 latency measurement yet.
 
 The host bounds each video client's pending output to about 24 KiB, accepts
-four viewers, and disconnects slow viewers instead of accumulating video lag.
+four video viewers and four independent semantic event subscribers, and disconnects slow viewers instead of accumulating video lag.
 It validates TS packet sync, not codec content. Four control clients also have
 bounded nonblocking response buffers. The relay stops viewers on source loss.
 
@@ -119,8 +119,7 @@ put into SSE events.** Consumers are signaled to call `android_observe` to
 obtain fresh semantic state; the SSE message is not independent causality
 proof. The same existing bearer credential is required and must be sent as
 a header, never in a URL or repository file. Existing native owner loop
-services these connections without spawning a worker. Four total client
-slots are shared between TS viewers and SSE subscribers; slow subscribers
+services these connections without spawning a worker. Four clients per channel type (eight total) are allowed; slow subscribers
 are disconnected instead of retaining an unbounded backlog. Heartbeat
 comments keep idle event subscribers aware of the connection.
 
