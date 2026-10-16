@@ -111,7 +111,9 @@ small; its HTTP authentication header uses the documented spelling above.
 The host also exposes authenticated `GET /events` on the same loopback
 HTTP port, with `Content-Type: text/event-stream` (SSE). The guest's
 validated state transition emits `event: state`; guest-result processing emits
-`event: result`; reset/invalidation emits `event: reset`. Each event has
+`event: result`; reset/invalidation emits `event: reset`. The stream
+also emits `event: video` with value 1 when encoded packets resume and 0
+when the producer disconnects or stalls. Each event has
 a monotonically increasing connection-lifetime event ID and a payload with
 only a public numeric value and host monotonic timestamp. **The private
 accessibility tree, node identifiers, user text and screenshots are never
