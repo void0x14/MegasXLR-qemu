@@ -340,6 +340,7 @@ static void list_tools(Span id)
           "\"operation\":{\"type\":\"string\",\"enum\":[\"click\",\"long_click\",\"set_text\",\"scroll_forward\",\"scroll_backward\",\"focus\"]},"
           "\"disk\":{\"type\":\"string\"},\"iso\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},"
           "\"disk_bus\":{\"type\":\"string\",\"enum\":[\"virtio\",\"ide\"]},"
+          "\"video_adapter\":{\"type\":\"string\",\"enum\":[\"virtio\",\"vga\"]},"
           "\"boot_source\":{\"type\":\"string\",\"enum\":[\"auto\",\"iso\",\"disk\"]},"
           "\"cpus\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4},\"cpu_percent\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":400},"
           "\"accel\":{\"type\":\"string\",\"enum\":[\"auto\",\"kvm\",\"whpx\",\"hvf\",\"tcg\"]},"
