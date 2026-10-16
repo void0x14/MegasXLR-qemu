@@ -1281,6 +1281,7 @@ cfg->cpu_percent=100;
 cfg->max_threads=48;
 snprintf(cfg->accel,sizeof(cfg->accel),"auto");
 snprintf(cfg->disk_bus,sizeof(cfg->disk_bus),"virtio");
+snprintf(cfg->boot_source,sizeof(cfg->boot_source),"auto");
 if(!mgp_env("MEGAS_CGROUP_PARENT",env,sizeof(env)))snprintf(cfg->cgroup_parent,sizeof(cfg->cgroup_parent),"%s",env);
 cfg->passwordless=1;
 
@@ -1775,6 +1776,7 @@ VM_START_FAIL();
       }
       if(config_string(j,"accel",e->cfg.accel,sizeof(e->cfg.accel))||
          config_string(j,"disk_bus",e->cfg.disk_bus,sizeof(e->cfg.disk_bus))||
+         config_string(j,"boot_source",e->cfg.boot_source,sizeof(e->cfg.boot_source))||
          config_string(j,"cgroup_parent",e->cfg.cgroup_parent,sizeof(e->cfg.cgroup_parent))){feedback(e,"Invalid acceleration or delegated resource path.");VM_START_FAIL();}
       if(!strcmp(e->cfg.accel,"auto"))snprintf(e->cfg.accel,sizeof(e->cfg.accel),"%s",mgp_default_accel());
       if(strcmp(e->cfg.accel,"kvm")&&strcmp(e->cfg.accel,"whpx")&&strcmp(e->cfg.accel,"hvf")&&strcmp(e->cfg.accel,"tcg")){
@@ -1782,6 +1784,9 @@ VM_START_FAIL();
       }
       if(strcmp(e->cfg.disk_bus,"virtio")&&strcmp(e->cfg.disk_bus,"ide")){
           feedback(e,"Choose virtio or ide for guest disk transport.");VM_START_FAIL();
+      }
+      if(strcmp(e->cfg.boot_source,"auto")&&strcmp(e->cfg.boot_source,"iso")&&strcmp(e->cfg.boot_source,"disk")){
+          feedback(e,"Choose auto, iso or disk for boot_source.");VM_START_FAIL();
       }
       if(e->cfg.cpus<1||e->cfg.cpus>4||e->cfg.cpu_percent<1||e->cfg.cpu_percent>400||e->cfg.max_threads<8||e->cfg.max_threads>128){
           feedback(e,"Choose 1-4 vCPUs, CPU budget 1-400 percent of one host CPU and 8-128 host tasks.");VM_START_FAIL();
@@ -1895,6 +1900,20 @@ if(e->cfg.iso[i]==',')cdrom[used++]=',';
 argv[n++]="-cdrom";
 argv[n++]=cdrom;
 }
+    if(!strcmp(e->cfg.boot_source,"iso")){
+        if(!e->cfg.iso[0]){
+            feedback(e,"ISO boot requested but no ISO image is configured.");
+            VM_START_FAIL();
+        }
+        argv[n++]="-boot";
+        argv[n++]=e->cfg.disk[0]?"once=d,order=c":"order=d";
+    }else if(!strcmp(e->cfg.boot_source,"disk")){
+        if(!e->cfg.disk[0]){
+            feedback(e,"Disk boot requested but no disk image is configured.");
+            VM_START_FAIL();
+        }
+        argv[n++]="-boot";argv[n++]="order=c";
+    }
     if(!e->cfg.android){
     if(e->cfg.seed_iso[0]) {
         snprintf(seed_path,sizeof(seed_path),"%s",e->cfg.seed_iso);
@@ -2370,6 +2389,7 @@ bstr(&b,e->status.phase);
     bstr(&b,e->guest_progress);
     bput(&b,"}},\"resources\":{\"accel\":");bstr(&b,e->cfg.accel);
     bput(&b,",\"disk_bus\":");bstr(&b,e->cfg.disk_bus);
+    bput(&b,",\"boot_source\":");bstr(&b,e->cfg.boot_source);
     bfmt(&b,",\"vcpus\":%u,\"cpu_percent_of_one_core\":%u,\"max_host_tasks\":%u,\"qemu_threads\":%u,\"qemu_memory_bytes\":%llu,\"hard_task_limit\":%s,",
           e->cfg.cpus,e->cfg.cpu_percent,e->cfg.max_threads,e->status.qemu_threads,
           (unsigned long long)e->status.qemu_memory_bytes,e->process.cgroup[0]?"true":"false");
