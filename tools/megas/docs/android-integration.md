@@ -32,7 +32,10 @@ containing a stream URL does not itself make a model watch a livestream.
 
 ## Native VM launch and host budgets
 
-The current launch device model is an **x86 PC**. The existing executable
+The current launch device model is an **x86 PC**. Megas also detects the
+QFI signature on locally supplied qcow2 disks renamed to `.img` or another
+extension; existing `.qcow2` filenames retain the earlier format selection.
+Unreadable disk or ISO paths now fail admission before QEMU is started. The existing executable
 selection is not an implementation of an ARM Android board or Google's
 goldfish/ranchu device model. Suitable locally prepared x86 images can use:
 
