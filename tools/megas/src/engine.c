@@ -2459,8 +2459,8 @@ bstr(&b,e->status.phase);
              (unsigned long long)ev->reported_cause,ev->targets);
     }
     bput(&b,"]");
-    bfmt(&b,"},\"livestream\":{\"available\":%s,\"transport\":\"mpegts-http\",\"url\":\"http://127.0.0.1:%u/live.ts\",\"authorization\":\"Bearer session credential; never put it in a URL\",\"bytes_relayed\":%llu,\"source_age_ms\":%llu,\"slow_clients_disconnected\":%llu},\"ocr\":{\"status\":",
-          mg_live_video_up(e->live)?"true":"false",e->cfg.stream_port,
+    bfmt(&b,"},\"livestream\":{\"available\":%s,\"transport\":\"mpegts-http\",\"url\":\"http://127.0.0.1:%u/live.ts\",\"authorization\":\"Bearer session credential; never put it in a URL\",\"events_url\":\"http://127.0.0.1:%u/events\",\"bytes_relayed\":%llu,\"source_age_ms\":%llu,\"slow_clients_disconnected\":%llu},\"ocr\":{\"status\":",
+          mg_live_video_up(e->live)?"true":"false",e->cfg.stream_port,e->cfg.stream_port,
           (unsigned long long)mg_live_bytes(e->live),(unsigned long long)mg_live_video_age(e->live),
           (unsigned long long)mg_live_slow_clients(e->live));
     bstr(&b,ocr_status_name(ocr_status));
