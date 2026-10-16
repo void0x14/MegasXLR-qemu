@@ -97,7 +97,7 @@ struct MgEngine {
     unsigned android_history_count, android_history_next;
     uint64_t android_revision, android_received, android_generation;
     uint64_t android_action_id, android_pending, android_queued, android_completed;
-    uint64_t android_events, android_rejected, resource_sample;
+    uint64_t android_events, android_rejected, android_messages, resource_sample;
     uint64_t android_guest_ms, android_guest_delta_ms, android_host_delta_ms;
     uint64_t android_state_host_ms, android_cause_action_id, android_revision_gaps;
     int android_uncertain, include_image;
@@ -2238,6 +2238,7 @@ static int android_tick_one(MgEngine *e)
     }
     line=mg_live_line(e->live);
     if(!line[0])return 0;
+    e->android_messages++;
     j=malloc(sizeof(*j));
     if(!j)return 0;
     if(jparse(j,line)||j->t[0].type!='{'||jstring(j,jget(j,0,"type"),type,sizeof(type)))goto invalid;
@@ -2372,11 +2373,11 @@ bstr(&b,e->status.phase);
     bfmt(&b,",\"vcpus\":%u,\"cpu_percent_of_one_core\":%u,\"max_host_tasks\":%u,\"qemu_threads\":%u,\"qemu_memory_bytes\":%llu,\"hard_task_limit\":%s},",
           e->cfg.cpus,e->cfg.cpu_percent,e->cfg.max_threads,e->status.qemu_threads,
           (unsigned long long)e->status.qemu_memory_bytes,e->process.cgroup[0]?"true":"false");
-    bfmt(&b,"\"android\":{\"enabled\":%s,\"provider_connected\":%s,\"state_age_ms\":%llu,\"events\":%llu,\"rejected\":%llu,\"pending_action_id\":%llu,\"uncertain\":%s,\"last_action_id\":%llu,\"outcome\":",
+    bfmt(&b,"\"android\":{\"enabled\":%s,\"provider_connected\":%s,\"state_age_ms\":%llu,\"events\":%llu,\"rejected\":%llu,\"processed_messages\":%llu,\"pending_action_id\":%llu,\"uncertain\":%s,\"last_action_id\":%llu,\"outcome\":",
           e->cfg.android?"true":"false",mg_live_control_up(e->live)?"true":"false",
           (unsigned long long)(e->android_received?mgp_now()-e->android_received:0),
           (unsigned long long)e->android_events,(unsigned long long)e->android_rejected,
-          (unsigned long long)e->android_pending,e->android_uncertain?"true":"false",(unsigned long long)e->android_action_id);
+          (unsigned long long)e->android_messages,(unsigned long long)e->android_pending,e->android_uncertain?"true":"false",(unsigned long long)e->android_action_id);
     bstr(&b,e->android_outcome);
     bfmt(&b,",\"queued_host_ms\":%llu,\"completed_host_ms\":%llu,\"round_trip_ms\":%llu,\"observed\":",
           (unsigned long long)e->android_queued,(unsigned long long)e->android_completed,
