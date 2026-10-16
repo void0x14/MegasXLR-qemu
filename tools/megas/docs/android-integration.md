@@ -89,6 +89,11 @@ They have no equivalent hard per-job thread limit in this implementation, so
 strict Android launch is rejected there. It is not advertised as completed
 Windows Android support. Thread count and memory usage are sampled at most
 twice a second and displayed in the command centre and `resources` response.
+When Linux delegated cgroup v2 is active, both samples now come directly from
+`pids.current` and `memory.current`, rather than enumerating host PIDs
+via `/proc`; memory is the **whole cgroup's** current usage and task count
+includes all processes and threads in the isolated VM. Otherwise, fallback
+sampling remains best-effort and cannot claim an enforced task limit.
 These are QEMU host threads, not guest Android application threads.
 
 ## Public transport boundary
