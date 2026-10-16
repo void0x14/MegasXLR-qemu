@@ -339,8 +339,12 @@ static void list_tools(Span id)
           "\"target\":{\"type\":\"string\"},\"epoch\":{\"type\":\"string\"},\"expected_revision\":{\"type\":\"integer\"},"
           "\"operation\":{\"type\":\"string\",\"enum\":[\"click\",\"long_click\",\"set_text\",\"scroll_forward\",\"scroll_backward\",\"focus\"]},"
           "\"disk\":{\"type\":\"string\"},\"iso\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},"
+          "\"disk_bus\":{\"type\":\"string\",\"enum\":[\"virtio\",\"ide\"]},"
+          "\"boot_source\":{\"type\":\"string\",\"enum\":[\"auto\",\"iso\",\"disk\"]},"
           "\"cpus\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4},\"cpu_percent\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":400},"
           "\"accel\":{\"type\":\"string\",\"enum\":[\"auto\",\"kvm\",\"whpx\",\"hvf\",\"tcg\"]},"
+          "\"ram_mb\":{\"type\":\"integer\",\"minimum\":16,\"maximum\":32768},"
+          "\"max_threads\":{\"type\":\"integer\",\"minimum\":8,\"maximum\":128},"
           "\"key\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"}},"
           "\"required\":[\"action\"],\"additionalProperties\":true}}]}}\n", stdout);
     fflush(stdout);
