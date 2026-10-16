@@ -40,7 +40,13 @@ goldfish/ranchu device model. Suitable locally prepared x86 images can use:
 {"action":"start","android":true,"disk":"/local/android.qcow2","ram_mb":2048,"accel":"kvm","cpus":1,"cpu_percent":100,"max_threads":48}
 ```
 
-The GUI exposes the same Android switch and CPU budget. A storage transport selector uses `virtio` by default or `ide` for legacy x86 images that do not expose virtio block devices. The selected disk transport is passed as an explicit QEMU device, not a post-boot patch. It does not guarantee that a given image contains the required kernel, partition or graphics support. It does not download an
+The GUI exposes the same Android switch and CPU budget. The installer ISO
+checkbox requests `boot_source:"iso"`: with an existing disk, QEMU boots
+the ISO **once** and returns to the disk on reboot. `boot_source:"disk"`
+explicitly boots the disk; `auto` preserves QEMU's default. An ISO must
+be configured before ISO boot, and a disk before disk boot. This selects the
+device, not an OS installation procedure; modified images still require
+compatible kernel, bootloader and hardware drivers. A storage transport selector uses `virtio` by default or `ide` for legacy x86 images that do not expose virtio block devices. The selected disk transport is passed as an explicit QEMU device, not a post-boot patch. It does not guarantee that a given image contains the required kernel, partition or graphics support. It does not download an
 image or install a provider. There is no Android SDK process in this host path.
 Android skips Linux NoCloud account creation and QGA login-policy retries.
 Automatic full RAM/disk checkpoints per input are disabled in Android mode;
