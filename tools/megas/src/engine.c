@@ -1815,6 +1815,10 @@ if(e->cfg.android){
 }
 
     argv[n++]=e->cfg.qemu;
+if(e->cfg.android){
+    argv[n++]="-object";
+    argv[n++]="main-loop,id=megas-main,thread-pool-min=0,thread-pool-max=2";
+}
 argv[n++]="-accel";
 snprintf(accel,sizeof(accel),"%s%s",e->cfg.accel,!strcmp(e->cfg.accel,"tcg")?",thread=single,tb-size=32":"");
 argv[n++]=accel;

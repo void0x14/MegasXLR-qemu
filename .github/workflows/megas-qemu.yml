@@ -36,6 +36,27 @@ jobs:
             echo 'Unexpected CPU fallback accepted'; exit 1
           fi
           grep -F 'no CPU-copy fallback' build-native/no-gpu.log
+      - name: Check the actual QEMU I/O worker pool limit
+        run: |
+          python3 - <<'PY'
+          import json, subprocess
+          commands = [
+              {'execute': 'qmp_capabilities'},
+              {'execute': 'qom-get', 'arguments': {'path': '/objects/megas-main', 'property': 'thread-pool-min'}, 'id': 'min'},
+              {'execute': 'qom-get', 'arguments': {'path': '/objects/megas-main', 'property': 'thread-pool-max'}, 'id': 'max'},
+              {'execute': 'quit'},
+          ]
+          result = subprocess.run([
+              'build-native/qemu-system-x86_64', '-machine', 'none', '-display', 'none',
+              '-nodefaults', '-object', 'main-loop,id=megas-main,thread-pool-min=0,thread-pool-max=2',
+              '-qmp', 'stdio',
+          ], input=''.join(json.dumps(c)+'\n' for c in commands), text=True,
+              capture_output=True, timeout=10, check=True)
+          replies = {r['id']: r for line in result.stdout.splitlines()
+                     if 'id' in (r := json.loads(line))}
+          assert replies['min']['return'] == 0, result.stdout
+          assert replies['max']['return'] == 2, result.stdout
+          PY
       - name: Controller regression checks
         run: make -C tools/megas headless test-engine test-android test-stream test-task-budget
       - name: Record the limits of this runner

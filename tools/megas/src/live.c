@@ -84,6 +84,20 @@ static int authorized(MgLive *s, const char *request)
     for (i = 0; i < 64; i++) mismatch |= (unsigned char)p[i] ^ (unsigned char)s->credential[i];
     return mismatch == 0;
 }
+static void viewer_flush(MgLive *s, Viewer *v, uint64_t now)
+{
+    int n;
+    if (v->socket == MGP_BAD_SOCKET || v->used == v->sent) return;
+    n = mgp_send(v->socket, v->output + v->sent, v->used - v->sent);
+    if (n == -1 || n == 0) { viewer_close(v); return; }
+    if (n > 0) { v->sent += (size_t)n; v->progress = now; }
+    if (v->sent == v->used) {
+        v->used = v->sent = 0;
+        if (v->streaming < 0) viewer_close(v);
+    } else if (now - v->progress >= 500) {
+        s->slow++; viewer_close(v);
+    }
+}
 static void viewer_tick(MgLive *s, Viewer *v, uint64_t now)
 {
     int n;
@@ -110,17 +124,7 @@ static void viewer_tick(MgLive *s, Viewer *v, uint64_t now)
             viewer_close(v); return;
         }
     }
-    if (v->used > v->sent) {
-        n = mgp_send(v->socket, v->output + v->sent, v->used - v->sent);
-        if (n == -1 || n == 0) { viewer_close(v); return; }
-        if (n > 0) { v->sent += (size_t)n; v->progress = now; }
-        if (v->sent == v->used) {
-            v->used = v->sent = 0;
-            if (v->streaming < 0) viewer_close(v);
-        } else if (now - v->progress >= 500) {
-            s->slow++; viewer_close(v);
-        }
-    }
+    viewer_flush(s, v, now);
 }
 
 void mg_live_tick(MgLive *s)
@@ -191,6 +195,8 @@ void mg_live_tick(MgLive *s)
         if (v->used + complete > sizeof(v->output)) { s->slow++; viewer_close(v); continue; }
         if (!v->used) v->progress = now;
         memcpy(v->output + v->used, s->video_data, complete); v->used += complete;
+        /* Submit encoded bytes now; do not add an owner-loop interval. */
+        viewer_flush(s, v, now);
     }
     memmove(s->video_data, s->video_data + complete, s->video_used - complete);
     s->video_used -= complete;

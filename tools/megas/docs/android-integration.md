@@ -65,6 +65,12 @@ Android skips Linux NoCloud account creation and QGA login-policy retries.
 Automatic full RAM/disk checkpoints per input are disabled in Android mode;
 explicit checkpoints remain available when the selected QEMU supports them.
 
+Android launch sets the actual QEMU main-loop I/O worker pool to zero reserved
+workers and at most two active workers, replacing QEMU's default maximum of
+64. This bounds that pool's growth before reaching the independent cgroup task
+cap; it does not cap every graphics-driver or guest thread pool. The relay
+submits newly received encoded packets during the same owner-loop iteration.
+
 `auto` selects accessible Linux KVM, otherwise single-threaded TCG for ordinary
 VMs, with an explicit 32 MiB TCG translation cache. QEMU otherwise sizes
 that cache from host RAM up to 1 GiB and commits it on Windows, which can

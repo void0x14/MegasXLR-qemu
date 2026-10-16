@@ -503,32 +503,33 @@ static void megas_early_init(DisplayOptions *options)
     DisplayMegas *config = &options->u.megas;
     g_autofree drmDevicePtr *devices = NULL;
     char reason[512] = "no accessible DRM render device";
-    int count, i;
+    int count, capacity, i;
     bool found = false;
 
     if (!options->has_gl || options->gl == DISPLAY_GL_MODE_OFF) {
         error_report("megas requires gl=on; no CPU-copy fallback");
         exit(1);
     }
-    if (config->has_rendernode && config->rendernode[0]) {
+    if (config->rendernode && config->rendernode[0]) {
         found = megas_probe_device(config->rendernode, options->gl,
                                    reason, sizeof(reason));
     } else {
         count = drmGetDevices2(0, NULL, 0);
         if (count > 0) {
-            devices = g_new0(drmDevicePtr, count);
-            count = drmGetDevices2(0, devices, count);
+            capacity = count;
+            devices = g_new0(drmDevicePtr, capacity);
+            count = MIN(drmGetDevices2(0, devices, capacity), capacity);
         }
         for (i = 0; i < count; i++) {
             const char *node;
-            if (!(devices[i]->available_nodes & (1 << DRM_NODE_RENDER))) {
+            if (!devices[i] ||
+                !(devices[i]->available_nodes & (1 << DRM_NODE_RENDER))) {
                 continue;
             }
             node = devices[i]->nodes[DRM_NODE_RENDER];
             if (megas_probe_device(node, options->gl, reason, sizeof(reason))) {
                 g_free(config->rendernode);
                 config->rendernode = g_strdup(node);
-                config->has_rendernode = true;
                 found = true;
                 break;
             }
