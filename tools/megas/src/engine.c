@@ -1281,6 +1281,7 @@ cfg->cpu_percent=100;
 cfg->max_threads=48;
 snprintf(cfg->accel,sizeof(cfg->accel),"auto");
 snprintf(cfg->disk_bus,sizeof(cfg->disk_bus),"virtio");
+snprintf(cfg->video_adapter,sizeof(cfg->video_adapter),"virtio");
 snprintf(cfg->boot_source,sizeof(cfg->boot_source),"auto");
 if(!mgp_env("MEGAS_CGROUP_PARENT",env,sizeof(env)))snprintf(cfg->cgroup_parent,sizeof(cfg->cgroup_parent),"%s",env);
 cfg->passwordless=1;
@@ -1789,11 +1790,15 @@ VM_START_FAIL();
       }
       if(config_string(j,"accel",e->cfg.accel,sizeof(e->cfg.accel))||
          config_string(j,"disk_bus",e->cfg.disk_bus,sizeof(e->cfg.disk_bus))||
+         config_string(j,"video_adapter",e->cfg.video_adapter,sizeof(e->cfg.video_adapter))||
          config_string(j,"boot_source",e->cfg.boot_source,sizeof(e->cfg.boot_source))||
          config_string(j,"cgroup_parent",e->cfg.cgroup_parent,sizeof(e->cfg.cgroup_parent))){feedback(e,"Invalid acceleration or delegated resource path.");VM_START_FAIL();}
       if(!strcmp(e->cfg.accel,"auto"))snprintf(e->cfg.accel,sizeof(e->cfg.accel),"%s",mgp_default_accel());
       if(strcmp(e->cfg.accel,"kvm")&&strcmp(e->cfg.accel,"whpx")&&strcmp(e->cfg.accel,"hvf")&&strcmp(e->cfg.accel,"tcg")){
           feedback(e,"Choose auto, kvm, whpx, hvf or explicitly tcg. Accelerators never silently fall back.");VM_START_FAIL();
+      }
+      if(strcmp(e->cfg.video_adapter,"virtio")&&strcmp(e->cfg.video_adapter,"vga")){
+          feedback(e,"Choose virtio or vga for display adapter.");VM_START_FAIL();
       }
       if(strcmp(e->cfg.disk_bus,"virtio")&&strcmp(e->cfg.disk_bus,"ide")){
           feedback(e,"Choose virtio or ide for guest disk transport.");VM_START_FAIL();
@@ -1858,8 +1863,11 @@ argv[n++]=vnc;
 
     argv[n++]="-display";
 argv[n++]="none";
-argv[n++]="-device";
-argv[n++]=video;
+if(!strcmp(e->cfg.video_adapter,"vga")){
+    argv[n++]="-vga";argv[n++]="std";
+}else{
+    argv[n++]="-device";argv[n++]=video;
+}
 argv[n++]="-fw_cfg";
 argv[n++]="name=opt/megas/guest,string=1";
 
@@ -2418,6 +2426,7 @@ bstr(&b,e->status.phase);
     bstr(&b,e->guest_progress);
     bput(&b,"}},\"resources\":{\"accel\":");bstr(&b,e->cfg.accel);
     bput(&b,",\"disk_bus\":");bstr(&b,e->cfg.disk_bus);
+    bput(&b,",\"video_adapter\":");bstr(&b,e->cfg.video_adapter);
     bput(&b,",\"boot_source\":");bstr(&b,e->cfg.boot_source);
     bfmt(&b,",\"vcpus\":%u,\"cpu_percent_of_one_core\":%u,\"max_host_tasks\":%u,\"qemu_threads\":%u,\"qemu_memory_bytes\":%llu,\"hard_task_limit\":%s,",
           e->cfg.cpus,e->cfg.cpu_percent,e->cfg.max_threads,e->status.qemu_threads,
