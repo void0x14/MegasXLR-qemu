@@ -120,7 +120,7 @@ static void viewer_tick(MgLive *s, Viewer *v, uint64_t now)
                                   (event_route && active_events >= MAX_EVENT_SUBSCRIBERS));
                 if (!ok) header = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 else if (full) header = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                else if (event_route) header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: keep-alive\r\n\r\n: megas-ready\n\n";
+                else if (event_route) header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: keep-alive\r\n\r\n: megas-ready\n\nevent: resync\ndata: {\"observe\":true}\n\n";
                 else if (!s->last_video || now - s->last_video >= 2000) header = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 else header = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
                 v->used = strlen(header); memcpy(v->output, header, v->used);
