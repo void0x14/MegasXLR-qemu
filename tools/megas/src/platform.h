@@ -57,6 +57,12 @@ typedef struct {
 } MgpVmLimits;
 int mgp_spawn_vm(MgpProcess *, char *const argv[], const char *logpath,
                  const MgpVmLimits *, char *error, size_t capacity);
+/* Kernel cgroup v2 counters (not logs or inferred guest state).
+ * Returns unavailable on hosts without the delegated VM cgroup. */
+typedef struct {
+    uint64_t tasks_current, pid_limit_hits, cpu_throttled_usec, oom_kills;
+} MgpVmPressure;
+int mgp_vm_pressure(MgpProcess *, MgpVmPressure *);
 unsigned mgp_process_threads(MgpProcess *);
 uint64_t mgp_available_memory(void);
 const char *mgp_default_accel(void);
