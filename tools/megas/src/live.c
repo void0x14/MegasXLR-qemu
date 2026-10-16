@@ -20,7 +20,7 @@ typedef struct {
 struct MgLive {
     unsigned control_port, video_port;
     MgpSocket control, video, listener;
-    uint64_t retry_control, retry_video, generation, bytes, slow, last_video;
+    uint64_t retry_control, retry_video, generation, bytes, slow, last_video, event_seq;
     char credential[65];
     char rx[MG_LIVE_LINE], line[MG_LIVE_LINE], tx[8192];
     size_t rx_used, tx_used, tx_sent;
@@ -101,12 +101,15 @@ static void viewer_tick(MgLive *s, Viewer *v, uint64_t now)
             v->request[v->request_used] = 0;
             if (strstr(v->request, "\r\n\r\n")) {
                 const char *header;
-                int ok = !strncmp(v->request, "GET /live.ts HTTP/1.", 20) && authorized(s, v->request);
+                int ts_route = !strncmp(v->request, "GET /live.ts HTTP/1.", strlen("GET /live.ts HTTP/1."));
+                int event_route = !strncmp(v->request, "GET /events HTTP/1.", strlen("GET /events HTTP/1."));
+                int ok = (ts_route || event_route) && authorized(s, v->request);
                 if (!ok) header = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                else if (event_route) header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: keep-alive\r\n\r\n: megas-ready\n\n";
                 else if (!s->last_video || now - s->last_video >= 2000) header = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 else header = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
                 v->used = strlen(header); memcpy(v->output, header, v->used);
-                v->streaming = ok && s->last_video && now - s->last_video < 2000 ? 1 : -1;
+                v->streaming = !ok ? -1 : event_route ? 2 : s->last_video && now - s->last_video < 2000 ? 1 : -1;
                 memset(v->request, 0, sizeof(v->request));
             }
         }
@@ -116,6 +119,11 @@ static void viewer_tick(MgLive *s, Viewer *v, uint64_t now)
     }
     if (v->streaming == 1 && v->used == v->sent && now - v->progress >= 2000) {
         viewer_close(v); return;
+    }
+    if (v->streaming == 2 && v->used == v->sent && now - v->progress >= 10000) {
+        static const char ping[] = ": ping\n\n";
+        memcpy(v->output, ping, sizeof(ping)-1);
+        v->used = sizeof(ping)-1; v->sent=0;
     }
     if (v->used > v->sent) {
         n = mgp_send(v->socket, v->output + v->sent, v->used - v->sent);
@@ -201,6 +209,32 @@ void mg_live_tick(MgLive *s)
     }
     memmove(s->video_data, s->video_data + complete, s->video_used - complete);
     s->video_used -= complete;
+}
+void mg_live_event(MgLive *s, const char *type, uint64_t value)
+{
+    char message[160];
+    int count;
+    unsigned i;
+    if(!s || !type || (strcmp(type,"state") && strcmp(type,"result") &&
+                        strcmp(type,"reset")))return;
+    count=snprintf(message,sizeof(message),
+                   "event: %s\\nid: %llu\\ndata: {\"value\":%llu,\"host_monotonic_ms\":%llu}\\n\\n",
+                   type,(unsigned long long)++s->event_seq,
+                   (unsigned long long)value,(unsigned long long)mgp_now());
+    if(count<0 || (size_t)count>=sizeof(message))return;
+    for(i=0;i<CLIENTS;i++){
+        Viewer *v=&s->viewers[i];
+        if(v->socket==MGP_BAD_SOCKET || v->streaming!=2)continue;
+        if(v->sent){
+            memmove(v->output,v->output+v->sent,v->used-v->sent);
+            v->used-=v->sent;v->sent=0;
+        }
+        if(v->used+(size_t)count>sizeof(v->output)){
+            s->slow++;viewer_close(v);continue;
+        }
+        memcpy(v->output+v->used,message,(size_t)count);
+        v->used+=(size_t)count;
+    }
 }
 const char *mg_live_line(MgLive *s) { return s ? s->line : ""; }
 int mg_live_send(MgLive *s, const char *line)
