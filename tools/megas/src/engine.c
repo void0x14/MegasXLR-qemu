@@ -3220,6 +3220,12 @@ display_tick(e);
         {
             MgpVmPressure sample;
             e->status.pressure_available=mgp_vm_pressure(&e->process,&sample)==0;
+            if(e->status.pressure_available){
+                if(sample.pid_limit_hits>e->status.task_limit_hits)
+                    mg_live_event(e->live,"resource",1); /* kernel pids.max hit */
+                if(sample.oom_kills>e->status.oom_kills)
+                    mg_live_event(e->live,"resource",2); /* contained OOM kill */
+            }
             e->status.tasks_current=e->status.pressure_available?sample.tasks_current:0;
             e->status.task_limit_hits=e->status.pressure_available?sample.pid_limit_hits:0;
             e->status.cpu_throttled_usec=e->status.pressure_available?sample.cpu_throttled_usec:0;
