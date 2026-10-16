@@ -218,7 +218,7 @@ void mg_live_event(MgLive *s, const char *type, uint64_t value)
     if(!s || !type || (strcmp(type,"state") && strcmp(type,"result") &&
                         strcmp(type,"reset")))return;
     count=snprintf(message,sizeof(message),
-                   "event: %s\\nid: %llu\\ndata: {\"value\":%llu,\"host_monotonic_ms\":%llu}\\n\\n",
+                   "event: %s\nid: %llu\ndata: {\"value\":%llu,\"host_monotonic_ms\":%llu}\n\n",
                    type,(unsigned long long)++s->event_seq,
                    (unsigned long long)value,(unsigned long long)mgp_now());
     if(count<0 || (size_t)count>=sizeof(message))return;
