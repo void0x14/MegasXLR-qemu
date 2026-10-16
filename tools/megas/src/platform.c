@@ -898,6 +898,52 @@ uint64_t mgp_available_memory(void)
     return 0;
 #endif
 }
+#ifdef __linux__
+static int cgroup_read_number(const char *dir,const char *file,
+                              const char *key,uint64_t *result)
+{
+    char path[1200],line[256];
+    FILE *input;
+    int found=0;
+    if(snprintf(path,sizeof(path),"%s/%s",dir,file)>=(int)sizeof(path))
+        return -1;
+    input=mgp_fopen(path,"r");
+    if(!input)return -1;
+    while(fgets(line,sizeof(line),input)){
+        unsigned long long number;
+        char label[64];
+        if(key){
+            if(sscanf(line,"%63s %llu",label,&number)==2 &&
+               !strcmp(label,key)){*result=(uint64_t)number;found=1;break;}
+        }else if(sscanf(line,"%llu",&number)==1){
+            *result=(uint64_t)number;found=1;break;
+        }
+    }
+    fclose(input);
+    return found?0:-1;
+}
+#endif
+int mgp_vm_pressure(MgpProcess *process,MgpVmPressure *output)
+{
+    if(!output)return -1;
+    memset(output,0,sizeof(*output));
+#ifdef __linux__
+    if(process&&process->cgroup[0]){
+        MgpVmPressure sample={0};
+        const char *dir=process->cgroup;
+        if(cgroup_read_number(dir,"pids.current",NULL,&sample.tasks_current) ||
+           cgroup_read_number(dir,"pids.events","max",&sample.pid_limit_hits) ||
+           cgroup_read_number(dir,"cpu.stat","throttled_usec",&sample.cpu_throttled_usec) ||
+           cgroup_read_number(dir,"memory.events","oom_kill",&sample.oom_kills))
+            return -1;
+        *output=sample;
+        return 0;
+    }
+#else
+    (void)process;
+#endif
+    return -1;
+}
 unsigned mgp_process_threads(MgpProcess *process)
 {
 #ifdef _WIN32
