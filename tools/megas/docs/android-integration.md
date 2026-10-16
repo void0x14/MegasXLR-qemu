@@ -122,9 +122,10 @@ when the producer disconnects or stalls. Each event has
 a monotonically increasing connection-lifetime event ID and a payload with
 only a public numeric value and host monotonic timestamp. **The private
 accessibility tree, node identifiers, user text and screenshots are never
-put into SSE events.** Consumers are signaled to call `android_observe` to
-obtain fresh semantic state; the SSE message is not independent causality
-proof. The same existing bearer credential is required and must be sent as
+put into SSE events.** Every new or reconnected SSE connection first receives `event: resync` so
+no missed events can silently be treated as a complete state history.
+Consumers must call `android_observe` to obtain fresh semantic state;
+the SSE message is not independent causality proof. The same existing bearer credential is required and must be sent as
 a header, never in a URL or repository file. Existing native owner loop
 services these connections without spawning a worker. Four clients per channel type (eight total) are allowed; slow subscribers
 are disconnected instead of retaining an unbounded backlog. Heartbeat
