@@ -46,7 +46,7 @@ typedef struct {
     int width, height, alive, focused, tab, settings_tab, advanced_settings, res_selected;
     int ram, vm_w, vm_h, passwordless, disk_gb, create_dialog, creating_disk;
     int password_field_visible;
-    int android, cpus, cpu_percent, android_ide;
+    int android, cpus, cpu_percent, android_ide, android_boot_iso;
     float row;
     char qemu[1024], disk[1024], iso[1024], checkpoint[64];
     char username[128], password[256];
@@ -203,8 +203,8 @@ static void gui_start(MgGui *ui)
     }
     if(ui->android){
         snprintf(request,sizeof(request),
-                 "{\"action\":\"start\",\"android\":true,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"cpus\":%d,\"cpu_percent\":%d,\"disk_bus\":\"%s\"}",
-                 qemu,disk,iso,ui->ram,ui->vm_w,ui->vm_h,ui->cpus,ui->cpu_percent,ui->android_ide?"ide":"virtio");
+                 "{\"action\":\"start\",\"android\":true,\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"cpus\":%d,\"cpu_percent\":%d,\"disk_bus\":\"%s\",\"boot_source\":\"%s\"}",
+                 qemu,disk,iso,ui->ram,ui->vm_w,ui->vm_h,ui->cpus,ui->cpu_percent,ui->android_ide?"ide":"virtio",ui->android_boot_iso?"iso":"auto");
         gui_queue(ui,request);gui_wipe(request,sizeof(request));return;
     }
     if (!ui->passwordless && ui->password[0] &&
@@ -755,6 +755,8 @@ static void gui_settings(MgGui *ui)
         nk_property_int(ctx,tr("CPU bütçesi %", "CPU budget %"),1,&ui->cpu_percent,400,10,1);
         nk_layout_row_dynamic(ctx,ui->row,1);
         nk_checkbox_label(ctx,tr("Eski Android imajları için IDE disk", "IDE disk for legacy Android images"),&ui->android_ide);
+        nk_layout_row_dynamic(ctx,ui->row,1);
+        nk_checkbox_label(ctx,tr("Kurulum ISO\u0027sundan bir defa aç", "Boot installer ISO once"),&ui->android_boot_iso);
         nk_layout_row_dynamic(ctx,ui->row*3,1);
         nk_label_wrap(ctx,tr("Yerel Android sağlayıcısı, donanım hızlandırması ve ayrılmış kaynak sınırları gerekir. Bu seçenek Android imajı veya Google uygulaması indirmez.",
                              "Requires a local Android provider, hardware acceleration and delegated resource limits. This option does not download Android images or Google apps."));
@@ -1499,6 +1501,7 @@ int mg_gui_run(MgEngine *engine)
     ui->ram=(int)config->ram_mb;ui->vm_w=(int)config->width;ui->vm_h=(int)config->height;
     ui->android=config->android;ui->cpus=(int)config->cpus;ui->cpu_percent=(int)config->cpu_percent;
     ui->android_ide=!strcmp(config->disk_bus,"ide");
+    ui->android_boot_iso=!strcmp(config->boot_source,"iso");
     ui->passwordless=config->passwordless;ui->disk_gb=16;
     for (int i = 1; i < RES_PRESETS_COUNT; ++i) {
         if (res_presets[i].w == ui->vm_w && res_presets[i].h == ui->vm_h) {
