@@ -518,7 +518,8 @@ static void megas_early_init(DisplayOptions *options)
         if (count > 0) {
             capacity = count;
             devices = g_new0(drmDevicePtr, capacity);
-            count = MIN(drmGetDevices2(0, devices, capacity), capacity);
+            count = drmGetDevices2(0, devices, capacity);
+            count = MIN(count, capacity);
         }
         for (i = 0; i < count; i++) {
             const char *node;
