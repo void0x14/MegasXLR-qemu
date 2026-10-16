@@ -28,6 +28,8 @@ typedef struct {
     unsigned qemu_threads;
     int android_ready, video_ready;
     uint64_t qemu_memory_bytes;
+    uint64_t tasks_current, task_limit_hits, cpu_throttled_usec, oom_kills;
+    int pressure_available;
     char image_path[1024], journal_path[1024];
 } MgStatus;
 void mg_config_defaults(MgConfig *);
