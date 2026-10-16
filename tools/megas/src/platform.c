@@ -754,6 +754,10 @@ int mgp_pid(MgpProcess *process)
     return (int)(process->pid ? process->pid : process->group);
 #endif
 }
+#ifdef __linux__
+static int cgroup_read_number(const char *dir,const char *file,
+                              const char *key,uint64_t *result);
+#endif
 uint64_t mgp_memory_bytes(MgpProcess *process)
 {
 #ifdef _WIN32
@@ -770,6 +774,10 @@ uint64_t mgp_memory_bytes(MgpProcess *process)
     char path[64], line[256];
     FILE *file;
     unsigned long long kb = 0;
+    uint64_t measured=0;
+    if(process && process->cgroup[0] &&
+       !cgroup_read_number(process->cgroup,"memory.current",NULL,&measured))
+        return measured;
     if (!process || process->pid <= 0) return 0;
     if (process->host_pid <= 0) {
         uint64_t now = mgp_now();
@@ -963,7 +971,12 @@ unsigned mgp_process_threads(MgpProcess *process)
     FILE *file;
     unsigned count = 0;
     if (!process || process->pid <= 0) return 0;
-    /* memory sampler resolves a namespace PID once and caches the host PID. */
+    if(process->cgroup[0]){
+        uint64_t tasks=0;
+        if(!cgroup_read_number(process->cgroup,"pids.current",NULL,&tasks))
+            return tasks>UINT_MAX?UINT_MAX:(unsigned)tasks;
+    }
+    /* Unbounded non-Android VMs fall back to host PID resolution. */
     if (process->host_pid <= 0) (void)mgp_memory_bytes(process);
     if (process->host_pid <= 0) return 0;
     snprintf(path, sizeof(path), "/proc/%ld/status", (long)process->host_pid);
