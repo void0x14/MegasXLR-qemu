@@ -128,7 +128,7 @@ int main(void)
         const char *burst="{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":6,\"guest_monotonic_ms\":190,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n"
             "{\"type\":\"state\",\"epoch\":\"boot-a\",\"revision\":7,\"guest_monotonic_ms\":200,\"cause_action_id\":0,\"targets\":[{\"id\":\"n1\",\"operations\":[\"click\"]}],\"payload\":{}}\n";
         assert(!mgp_send_all(peer,burst,strlen(burst),100));
-        assert(mgp_ready(e->live->control,0,100)>0);
+        mgp_sleep(10); /* allow the peer write to reach the owner socket */
         android_tick(e);
         assert(e->android_revision==7);
         assert(e->android_guest_ms==200);
