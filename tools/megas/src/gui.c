@@ -1034,6 +1034,17 @@ static void gui_draw(MgGui *ui)
                  s->qemu_threads,(double)s->qemu_memory_bytes/(1024*1024),s->android_ready?"ready":"-",s->video_ready?"live":"-",
                  ui->feedback[0] ? ui->feedback : s->feedback);
         nk_label_wrap(ctx,line);
+        if(s->pressure_available){
+            nk_layout_row_dynamic(ctx,ui->row*1.5f,1);
+            snprintf(line,sizeof(line),
+                     "Kernel: %llu/%u tasks · %llu PID-limit hits · %.1f s CPU throttled · %llu OOM kills",
+                     (unsigned long long)s->tasks_current,
+                     mg_engine_config(ui->engine)->max_threads,
+                     (unsigned long long)s->task_limit_hits,
+                     (double)s->cpu_throttled_usec/1000000.0,
+                     (unsigned long long)s->oom_kills);
+            nk_label_wrap(ctx,line);
+        }
         if (ui->width >= 960) {
             nk_layout_row_begin(ctx,NK_STATIC,body,2);
             nk_layout_row_push(ctx,(float)ui->width-390);
