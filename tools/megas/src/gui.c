@@ -756,7 +756,7 @@ static void gui_settings(MgGui *ui)
         nk_layout_row_dynamic(ctx,ui->row,1);
         nk_checkbox_label(ctx,tr("Eski Android imajları için IDE disk", "IDE disk for legacy Android images"),&ui->android_ide);
         nk_layout_row_dynamic(ctx,ui->row,1);
-        nk_checkbox_label(ctx,tr("Kurulum ISO\u0027sundan bir defa aç", "Boot installer ISO once"),&ui->android_boot_iso);
+        nk_checkbox_label(ctx,tr("Kurulum ISO'sundan bir defa aç", "Boot installer ISO once"),&ui->android_boot_iso);
         nk_layout_row_dynamic(ctx,ui->row*3,1);
         nk_label_wrap(ctx,tr("Yerel Android sağlayıcısı, donanım hızlandırması ve ayrılmış kaynak sınırları gerekir. Bu seçenek Android imajı veya Google uygulaması indirmez.",
                              "Requires a local Android provider, hardware acceleration and delegated resource limits. This option does not download Android images or Google apps."));
