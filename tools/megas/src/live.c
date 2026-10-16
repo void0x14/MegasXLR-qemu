@@ -236,7 +236,7 @@ void mg_live_event(MgLive *s, const char *type, uint64_t value)
     int count;
     unsigned i;
     if(!s || !type || (strcmp(type,"state") && strcmp(type,"result") &&
-                        strcmp(type,"reset") && strcmp(type,"video")))return;
+                        strcmp(type,"reset") && strcmp(type,"video") && strcmp(type,"resource")))return;
     count=snprintf(message,sizeof(message),
                    "event: %s\nid: %llu\ndata: {\"value\":%llu,\"host_monotonic_ms\":%llu}\n\n",
                    type,(unsigned long long)++s->event_seq,
