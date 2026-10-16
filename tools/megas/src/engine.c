@@ -2370,9 +2370,15 @@ bstr(&b,e->status.phase);
     bstr(&b,e->guest_progress);
     bput(&b,"}},\"resources\":{\"accel\":");bstr(&b,e->cfg.accel);
     bput(&b,",\"disk_bus\":");bstr(&b,e->cfg.disk_bus);
-    bfmt(&b,",\"vcpus\":%u,\"cpu_percent_of_one_core\":%u,\"max_host_tasks\":%u,\"qemu_threads\":%u,\"qemu_memory_bytes\":%llu,\"hard_task_limit\":%s},",
+    bfmt(&b,",\"vcpus\":%u,\"cpu_percent_of_one_core\":%u,\"max_host_tasks\":%u,\"qemu_threads\":%u,\"qemu_memory_bytes\":%llu,\"hard_task_limit\":%s,",
           e->cfg.cpus,e->cfg.cpu_percent,e->cfg.max_threads,e->status.qemu_threads,
           (unsigned long long)e->status.qemu_memory_bytes,e->process.cgroup[0]?"true":"false");
+    bfmt(&b,"\"kernel_pressure\":{\"available\":%s,\"tasks\":%llu,\"task_limit_hits\":%llu,\"cpu_throttled_usec\":%llu,\"oom_kills\":%llu}},",
+          e->status.pressure_available?"true":"false",
+          (unsigned long long)e->status.tasks_current,
+          (unsigned long long)e->status.task_limit_hits,
+          (unsigned long long)e->status.cpu_throttled_usec,
+          (unsigned long long)e->status.oom_kills);
     bfmt(&b,"\"android\":{\"enabled\":%s,\"provider_connected\":%s,\"state_age_ms\":%llu,\"events\":%llu,\"rejected\":%llu,\"processed_messages\":%llu,\"pending_action_id\":%llu,\"uncertain\":%s,\"last_action_id\":%llu,\"outcome\":",
           e->cfg.android?"true":"false",mg_live_control_up(e->live)?"true":"false",
           (unsigned long long)(e->android_received?mgp_now()-e->android_received:0),
@@ -3153,6 +3159,19 @@ display_tick(e);
         e->resource_sample=mgp_now();
         e->status.qemu_memory_bytes=mgp_memory_bytes(&e->process);
         e->status.qemu_threads=mgp_process_threads(&e->process);
+        {
+            MgpVmPressure sample;
+            e->status.pressure_available=mgp_vm_pressure(&e->process,&sample)==0;
+            e->status.tasks_current=e->status.pressure_available?sample.tasks_current:0;
+            e->status.task_limit_hits=e->status.pressure_available?sample.pid_limit_hits:0;
+            e->status.cpu_throttled_usec=e->status.pressure_available?sample.cpu_throttled_usec:0;
+            e->status.oom_kills=e->status.pressure_available?sample.oom_kills:0;
+        }
+    }
+    if(!e->status.owned_pid){
+        e->status.pressure_available=0;
+        e->status.tasks_current=e->status.task_limit_hits=0;
+        e->status.cpu_throttled_usec=e->status.oom_kills=0;
     }
 
     if(e->job_active&&!e->late_id&&mgp_now()-e->last_job_poll>100){snapshot_poll(e);
