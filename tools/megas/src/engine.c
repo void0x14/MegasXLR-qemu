@@ -2259,6 +2259,7 @@ static void android_invalidate(MgEngine *e)
     memset(e->android_targets,0,sizeof(e->android_targets));
     e->android_target_count=0;
     e->android_history_count=e->android_history_next=0;
+    mg_live_event(e->live,"reset",0);
     e->android_revision=e->android_received=0;
     e->android_guest_ms=e->android_guest_delta_ms=e->android_host_delta_ms=0;
     e->android_state_host_ms=e->android_cause_action_id=0;
@@ -2311,6 +2312,7 @@ static int android_tick_one(MgEngine *e)
         e->android_revision=revision;
         e->android_received=e->android_state_host_ms=mgp_now();
         e->android_events++;
+        mg_live_event(e->live,"state",revision);
         {
             MgAndroidEvent *event=&e->android_history[e->android_history_next];
             event->revision=revision;event->guest_ms=guest_ms;
@@ -2332,6 +2334,7 @@ static int android_tick_one(MgEngine *e)
         e->android_completed=mgp_now();e->android_pending=0;e->android_uncertain=0;
         if(!strcmp(outcome,"rejected"))e->android_rejected++;
         journal(e,"android_action_result",outcome);
+        mg_live_event(e->live,"result",id);
     }else goto invalid;
     free(j);return 1;
 invalid:
