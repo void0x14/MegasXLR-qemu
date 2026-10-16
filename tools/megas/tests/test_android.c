@@ -20,12 +20,11 @@ static unsigned unused_port(void)
 }
 static void feed(MgEngine *e,MgpSocket peer,const char *line)
 {
-    uint64_t deadline=mgp_now()+1000;
-    size_t length=strlen(line)-1;
+    uint64_t deadline=mgp_now()+1000, before=e->android_messages;
     assert(!mgp_send_all(peer,line,strlen(line),100));
     do {
         android_tick(e);
-        if(strlen(mg_live_line(e->live))==length&&!memcmp(mg_live_line(e->live),line,length))return;
+        if(e->android_messages>before)return;
         mgp_sleep(1);
     }while(mgp_now()<deadline);
     assert(!"provider message was not consumed");
