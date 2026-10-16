@@ -118,7 +118,10 @@ HTTP port, with `Content-Type: text/event-stream` (SSE). The guest's
 validated state transition emits `event: state`; guest-result processing emits
 `event: result`; reset/invalidation emits `event: reset`. The stream
 also emits `event: video` with value 1 when encoded packets resume and 0
-when the producer disconnects or stalls. Each event has
+when the producer disconnects or stalls. OS-enforced cgroup events emit
+`event: resource` with numeric value `1` for a host task-limit hit and `2`
+for a contained kernel OOM kill. These events report actual kernel counters,
+not inferred Android UI state. Each event has
 a monotonically increasing connection-lifetime event ID and a payload with
 only a public numeric value and host monotonic timestamp. **The private
 accessibility tree, node identifiers, user text and screenshots are never
