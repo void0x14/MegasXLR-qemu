@@ -2,7 +2,7 @@ name: Megas GPU stream build (not Android qualification)
 on:
   push:
     branches: ['work/android-runtime-native-stream']
-    paths: ['ui/megas*', 'ui/meson.build', 'qapi/ui.json', 'meson*', 'scripts/meson-buildoptions.sh', 'tools/megas/**', '.github/workflows/megas-qemu.yml']
+    paths: ['ui/megas*', 'ui/egl-helpers.c', 'ui/meson.build', 'qapi/ui.json', 'meson*', 'scripts/meson-buildoptions.sh', 'tools/megas/**', '.github/workflows/megas-qemu.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,14 +28,23 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -O2 -DMEGAS_VIDEO_STANDALONE -Iui tools/megas/tests/gpu_video_fixture.c ui/megas-video.c ui/megas-mpegts.c $(pkg-config --cflags --libs libavcodec libavfilter libavutil libdrm gbm epoxy) -o build-native/gpu-video-fixture
           build-native/gpu-video-fixture --negative
+          ninja -C build-native -j2 libsystem.a.p/ui_megas.c.o libsystem.a.p/ui_megas-video.c.o libsystem.a.p/ui_megas-mpegts.c.o
           ninja -C build-native -j2 qemu-system-x86_64 qemu-img
       - name: Reject missing GPU configuration, without software fallback
         run: |
-          set -euo pipefail
-          if build-native/qemu-system-x86_64 -display megas,port=49396,rendernode=/dev/dri/renderD65535 -machine none > build-native/no-gpu.log 2>&1; then
-            echo 'Unexpected CPU fallback accepted'; exit 1
-          fi
-          grep -F 'no CPU-copy fallback' build-native/no-gpu.log
+          python3 - <<'PY'
+          import subprocess
+          from pathlib import Path
+          diagnostics = []
+          for display in ('megas,port=49396', 'megas,gl=on,port=49396,rendernode=/dev/dri/renderD65535'):
+              result = subprocess.run(['build-native/qemu-system-x86_64', '-display', display,
+                  '-machine', 'none'], capture_output=True, text=True, timeout=10)
+              diagnostics.append(result.stderr)
+              # A signal/crash during cleanup is a failure, not a safe rejection.
+              assert result.returncode == 1, (result.returncode, result.stderr)
+              assert 'no CPU-copy fallback' in result.stderr, result.stderr
+          Path('build-native/no-gpu.log').write_text('\n'.join(diagnostics))
+          PY
       - name: Check the actual QEMU I/O worker pool limit
         run: |
           python3 - <<'PY'

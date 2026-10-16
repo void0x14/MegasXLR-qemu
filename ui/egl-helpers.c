@@ -227,7 +227,7 @@ EGLContext qemu_egl_rn_ctx;
 
 #ifdef CONFIG_GBM
 
-int qemu_egl_rn_fd;
+int qemu_egl_rn_fd = -1;
 struct gbm_device *qemu_egl_rn_gbm_dev;
 
 int egl_rendernode_init(const char *rendernode, DisplayGLMode mode)
@@ -279,13 +279,7 @@ int egl_rendernode_init(const char *rendernode, DisplayGLMode mode)
     return 0;
 
 err:
-    if (qemu_egl_rn_gbm_dev) {
-        gbm_device_destroy(qemu_egl_rn_gbm_dev);
-    }
-    if (qemu_egl_rn_fd != -1) {
-        close(qemu_egl_rn_fd);
-    }
-
+    egl_cleanup();
     return -1;
 }
 
@@ -295,8 +289,16 @@ bool egl_dmabuf_export_texture(uint32_t tex_id, int *fd, EGLint *offset,
 {
     EGLImageKHR image;
     EGLuint64KHR modifiers[DMABUF_MAX_PLANES];
+    int exported_fd[DMABUF_MAX_PLANES];
+    EGLint exported_offset[DMABUF_MAX_PLANES];
+    EGLint exported_stride[DMABUF_MAX_PLANES];
+    bool success = false;
     int i;
 
+    *num_planes = 0;
+    for (i = 0; i < DMABUF_MAX_PLANES; i++) {
+        exported_fd[i] = -1;
+    }
     image = eglCreateImageKHR(qemu_egl_display, eglGetCurrentContext(),
                               EGL_GL_TEXTURE_2D_KHR,
                               (EGLClientBuffer)(unsigned long)tex_id,
@@ -305,10 +307,15 @@ bool egl_dmabuf_export_texture(uint32_t tex_id, int *fd, EGLint *offset,
         return false;
     }
 
-    eglExportDMABUFImageQueryMESA(qemu_egl_display, image, fourcc,
-                                  num_planes, modifiers);
-    eglExportDMABUFImageMESA(qemu_egl_display, image, fd, stride, offset);
-    eglDestroyImageKHR(qemu_egl_display, image);
+    if (!eglExportDMABUFImageQueryMESA(qemu_egl_display, image, fourcc,
+                                      num_planes, modifiers) ||
+        *num_planes <= 0 || *num_planes > DMABUF_MAX_PLANES) {
+        goto out;
+    }
+    if (!eglExportDMABUFImageMESA(qemu_egl_display, image, exported_fd,
+                                  exported_stride, exported_offset)) {
+        goto out;
+    }
 
     /* Only first modifier matters. */
     if (modifier) {
@@ -316,11 +323,27 @@ bool egl_dmabuf_export_texture(uint32_t tex_id, int *fd, EGLint *offset,
     }
 
     for (i = 0; i < *num_planes; i++) {
-        if (fd[i] < 0) {
-            return false;
+        if (exported_fd[i] < 0) {
+            goto out;
         }
     }
-    return true;
+    for (i = 0; i < *num_planes; i++) {
+        fd[i] = exported_fd[i];
+        stride[i] = exported_stride[i];
+        offset[i] = exported_offset[i];
+    }
+    success = true;
+out:
+    eglDestroyImageKHR(qemu_egl_display, image);
+    if (!success) {
+        for (i = 0; i < DMABUF_MAX_PLANES; i++) {
+            if (exported_fd[i] >= 0) {
+                close(exported_fd[i]);
+            }
+        }
+        *num_planes = 0;
+    }
+    return success;
 }
 
 void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
@@ -694,6 +717,7 @@ EGLContext qemu_egl_init_ctx(void)
     b = eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, ectx);
     if (b == EGL_FALSE) {
         error_report("egl: eglMakeCurrent failed");
+        eglDestroyContext(qemu_egl_display, ectx);
         return NULL;
     }
 
