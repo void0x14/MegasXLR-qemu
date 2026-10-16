@@ -40,7 +40,8 @@ static void video_close(MgLive *s)
     unsigned i;
     mgp_close(s->video); s->video = MGP_BAD_SOCKET;
     s->video_used = 0; s->last_video = 0;
-    for (i = 0; i < CLIENTS; i++) viewer_close(&s->viewers[i]);
+    for (i = 0; i < CLIENTS; i++)
+        if (s->viewers[i].streaming == 1) viewer_close(&s->viewers[i]);
 }
 static void control_close(MgLive *s)
 {
@@ -69,7 +70,9 @@ MgLive *mg_live_new(unsigned control, unsigned video, unsigned http,
 void mg_live_free(MgLive *s)
 {
     if (!s) return;
-    video_close(s); control_close(s); mgp_close(s->listener);
+    video_close(s);
+    for (unsigned i = 0; i < CLIENTS; i++) viewer_close(&s->viewers[i]);
+    control_close(s); mgp_close(s->listener);
     memset(s->credential, 0, sizeof(s->credential));
     free(s);
 }
