@@ -108,6 +108,22 @@ The response's `livestream.available` requires recent valid TS bytes. Missing
 video returns 503, invalid authentication returns 403. The relay is deliberately
 small; its HTTP authentication header uses the documented spelling above.
 
+The host also exposes authenticated `GET /events` on the same loopback
+HTTP port, with `Content-Type: text/event-stream` (SSE). The guest's
+validated state transition emits `event: state`; guest-result processing emits
+`event: result`; reset/invalidation emits `event: reset`. Each event has
+a monotonically increasing connection-lifetime event ID and a payload with
+only a public numeric value and host monotonic timestamp. **The private
+accessibility tree, node identifiers, user text and screenshots are never
+put into SSE events.** Consumers are signaled to call `android_observe` to
+obtain fresh semantic state; the SSE message is not independent causality
+proof. The same existing bearer credential is required and must be sent as
+a header, never in a URL or repository file. Existing native owner loop
+services these connections without spawning a worker. Four total client
+slots are shared between TS viewers and SSE subscribers; slow subscribers
+are disconnected instead of retaining an unbounded backlog. Heartbeat
+comments keep idle event subscribers aware of the connection.
+
 The semantic provider is separate software built and installed on the user's
 computer. The public host treats its `payload` as opaque. It must emit:
 
