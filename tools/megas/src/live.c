@@ -40,6 +40,7 @@ static void viewer_close(Viewer *v)
 static void video_close(MgLive *s)
 {
     unsigned i;
+    if (s->last_video) mg_live_event(s, "video", 0);
     mgp_close(s->video); s->video = MGP_BAD_SOCKET;
     s->video_used = 0; s->last_video = 0;
     for (i = 0; i < CLIENTS; i++)
@@ -161,6 +162,10 @@ void mg_live_tick(MgLive *s)
     char *newline;
     if (!s) return;
     now = mgp_now(); s->line[0] = 0;
+    if(s->last_video && now-s->last_video >= 2000){
+        s->last_video=0;
+        mg_live_event(s,"video",0);
+    }
     if (s->control == MGP_BAD_SOCKET && now >= s->retry_control) {
         s->retry_control = now + 250;
         s->control = mgp_connect(s->control_port, 1);
@@ -213,6 +218,7 @@ void mg_live_tick(MgLive *s)
     complete = s->video_used / 188 * 188;
     if (!complete) return;
     for (i = 0; i < complete; i += 188) if (s->video_data[i] != 0x47) { video_close(s); return; }
+    if(!s->last_video) mg_live_event(s,"video",1);
     s->last_video = now; s->bytes += complete;
     for (i = 0; i < CLIENTS; i++) {
         Viewer *v = &s->viewers[i];
@@ -230,7 +236,7 @@ void mg_live_event(MgLive *s, const char *type, uint64_t value)
     int count;
     unsigned i;
     if(!s || !type || (strcmp(type,"state") && strcmp(type,"result") &&
-                        strcmp(type,"reset")))return;
+                        strcmp(type,"reset") && strcmp(type,"video")))return;
     count=snprintf(message,sizeof(message),
                    "event: %s\nid: %llu\ndata: {\"value\":%llu,\"host_monotonic_ms\":%llu}\n\n",
                    type,(unsigned long long)++s->event_seq,
