@@ -7,7 +7,9 @@
 #include <sys/socket.h>
 #endif
 
-#define CLIENTS 4
+#define CLIENTS 8
+#define MAX_VIDEO_VIEWERS 4
+#define MAX_EVENT_SUBSCRIBERS 4
 typedef struct {
     MgpSocket socket;
     uint64_t accepted, progress;
@@ -106,13 +108,22 @@ static void viewer_tick(MgLive *s, Viewer *v, uint64_t now)
                 const char *header;
                 int ts_route = !strncmp(v->request, "GET /live.ts HTTP/1.", strlen("GET /live.ts HTTP/1."));
                 int event_route = !strncmp(v->request, "GET /events HTTP/1.", strlen("GET /events HTTP/1."));
+                unsigned active_video = 0, active_events = 0, j;
+                for (j = 0; j < CLIENTS; j++) {
+                    if (s->viewers[j].socket == MGP_BAD_SOCKET) continue;
+                    if (s->viewers[j].streaming == 1) active_video++;
+                    if (s->viewers[j].streaming == 2) active_events++;
+                }
                 int ok = (ts_route || event_route) && authorized(s, v->request);
+                int full = ok && ((ts_route && active_video >= MAX_VIDEO_VIEWERS) ||
+                                  (event_route && active_events >= MAX_EVENT_SUBSCRIBERS));
                 if (!ok) header = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                else if (full) header = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 else if (event_route) header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: keep-alive\r\n\r\n: megas-ready\n\n";
                 else if (!s->last_video || now - s->last_video >= 2000) header = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 else header = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
                 v->used = strlen(header); memcpy(v->output, header, v->used);
-                v->streaming = !ok ? -1 : event_route ? 2 : s->last_video && now - s->last_video < 2000 ? 1 : -1;
+                v->streaming = (!ok || full) ? -1 : event_route ? 2 : s->last_video && now - s->last_video < 2000 ? 1 : -1;
                 memset(v->request, 0, sizeof(v->request));
             }
         }
