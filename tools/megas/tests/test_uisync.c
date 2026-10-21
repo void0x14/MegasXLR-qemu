@@ -95,11 +95,15 @@ static void test_operator_disk_is_never_replaced(void)
     memset(&state, 0, sizeof(state));
     snprintf(state.disk, sizeof(state.disk), "/operator/chosen.qcow2");
     state.disk_dirty = 1;
+    state.ram = 1024;
     memset(&source, 0, sizeof(source));
     snprintf(source.disk, sizeof(source.disk), "/engine/other.qcow2");
     source.ram_mb = 4096;
-    assert(mg_ui_sync(&state, &source) == 1);
+    /* The engine's disk is not the one the operator named, so neither its
+     * disk nor the memory that belongs to that other disk is taken. */
+    assert(mg_ui_sync(&state, &source) == 0);
     assert(strcmp(state.disk, "/operator/chosen.qcow2") == 0);
+    assert(state.ram == 1024);
     puts("uisync: a disk the operator chose is never replaced by the engine");
 }
 
@@ -152,11 +156,20 @@ static void test_unknown_bus_is_not_adopted(void)
     MgUiSyncSource source;
     memset(&state, 0, sizeof(state));
     memset(&source, 0, sizeof(source));
+    snprintf(source.disk, sizeof(source.disk), "/known/winlpe.qcow2");
     snprintf(source.bus, sizeof(source.bus), "floppy");
     source.ram_mb = 4096;
     mg_ui_sync(&state, &source);
     assert(state.bus[0] == 0);
     assert(state.ram == 4096);
+    /* The engine reports no disk at all, so what it remembers belongs to no
+     * disk and the form takes none of it. */
+    memset(&state, 0, sizeof(state));
+    memset(&source, 0, sizeof(source));
+    source.ram_mb = 4096;
+    assert(mg_ui_sync(&state, &source) == 0);
+    assert(state.ram == 0);
+    assert(state.bus[0] == 0);
     puts("uisync: an unknown disk controller is never adopted by the form");
 }
 
@@ -267,10 +280,94 @@ static void test_the_answer_fields_are_read(void)
     puts("uisync: every field of the controller's answer is read at its value");
 }
 
+static void test_the_preflight_answer_is_read(void)
+{
+    /* The answer a preflight gives, in the shape the controller sends it.
+     * The form takes the memory and the controller of the disk it was asked
+     * about from here, not the ones of the VM that happens to be running. */
+    const char *answer = "{\"ok\":true,\"state\":{\"running\":true},"
+        "\"vm\":{\"disk\":\"/other/running.qcow2\",\"memory_mb\":4096,\"bus\":\"virtio\","
+        "\"ram_mb\":4096,\"disk_bus\":\"virtio\"},"
+        "\"preflight_disk\":\"/known/winlpe.qcow2\",\"preflight_ram_mb\":2048,"
+        "\"preflight_bus\":\"ide\",\"preflight_video\":\"VGA\","
+        "\"preflight_known\":true,\"preflight_image_exists\":true}";
+    char text[256];
+    assert(mg_json_has(answer, "preflight_known") == 1);
+    assert(mg_json_field_bool(answer, "preflight_known", 0) == 1);
+    assert(mg_json_field_int(answer, "preflight_ram_mb", 0) == 2048);
+    assert(mg_json_field_text(answer, "preflight_bus", text, sizeof(text)) == 1);
+    assert(strcmp(text, "ide") == 0);
+    assert(mg_json_field_bool(answer, "preflight_image_exists", 0) == 1);
+    /* The running VM's own values are still there, for the state that
+     * describes it. */
+    assert(mg_json_field_int(answer, "ram_mb", 0) == 4096);
+    puts("uisync: the preflight answer is read for the disk that was asked about");
+}
+
+static void test_the_engines_memory_stays_with_its_own_disk(void)
+{
+    MgUiSyncState state;
+    MgUiSyncSource source;
+    /* The engine runs one VM. The form names a different disk, whose memory
+     * and controller are recorded. The running VM's values say nothing about
+     * that disk, so they must not replace what it recorded: a disk installed
+     * on IDE would otherwise be started on whatever the running VM used. */
+    memset(&state, 0, sizeof(state));
+    snprintf(state.disk, sizeof(state.disk), "/known/winlpe.qcow2");
+    state.disk_dirty = 1;
+    state.ram = 2048;
+    snprintf(state.bus, sizeof(state.bus), "ide");
+    memset(&source, 0, sizeof(source));
+    snprintf(source.disk, sizeof(source.disk), "/other/running.qcow2");
+    snprintf(source.bus, sizeof(source.bus), "virtio");
+    source.ram_mb = 4096;
+    assert(mg_ui_sync(&state, &source) == 0);
+    assert(strcmp(state.disk, "/known/winlpe.qcow2") == 0);
+    assert(state.ram == 2048);
+    assert(strcmp(state.bus, "ide") == 0);
+    puts("uisync: the running VM's memory and controller stay with its own disk");
+}
+
+static void test_memory_comes_with_the_disk_that_is_adopted(void)
+{
+    MgUiSyncState state;
+    MgUiSyncSource source;
+    /* The agent started a VM the form has not seen. The form adopts the disk
+     * and must adopt its memory and controller with it, so it describes the
+     * same VM the engine is running. */
+    memset(&state, 0, sizeof(state));
+    memset(&source, 0, sizeof(source));
+    snprintf(source.disk, sizeof(source.disk), "/agent/winlpe.qcow2");
+    snprintf(source.bus, sizeof(source.bus), "ide");
+    source.ram_mb = 4096;
+    assert(mg_ui_sync(&state, &source) == 1);
+    assert(strcmp(state.disk, "/agent/winlpe.qcow2") == 0);
+    assert(state.ram == 4096);
+    assert(strcmp(state.bus, "ide") == 0);
+    assert(state.disk_dirty == 0);
+    /* And the form already naming that disk keeps the same values. */
+    {
+        MgUiSyncState same;
+        memset(&same, 0, sizeof(same));
+        snprintf(same.disk, sizeof(same.disk), "/agent/winlpe.qcow2");
+        same.disk_dirty = 1;
+        same.ram = 256;
+        same.ram_dirty = 1;
+        snprintf(same.bus, sizeof(same.bus), "virtio");
+        same.bus_dirty = 1;
+        assert(mg_ui_sync(&same, &source) == 0);
+        assert(same.ram == 256);
+        assert(strcmp(same.bus, "virtio") == 0);
+    }
+    puts("uisync: memory and controller arrive with the disk they belong to");
+}
+
 int main(void)
 {
     test_agent_start_fills_the_form();
     test_engine_disk_replaces_a_stale_form_disk();
+    test_the_engines_memory_stays_with_its_own_disk();
+    test_memory_comes_with_the_disk_that_is_adopted();
     test_the_engine_clears_the_operator_mark();
     test_operator_touch_marks_the_field();
     test_operator_disk_is_never_replaced();
@@ -281,6 +378,7 @@ int main(void)
     test_named_vm_fills_the_form();
     test_the_field_and_the_editor_copy_never_diverge();
     test_the_answer_fields_are_read();
+    test_the_preflight_answer_is_read();
     puts("uisync: all controller state rules passed");
     return 0;
 }

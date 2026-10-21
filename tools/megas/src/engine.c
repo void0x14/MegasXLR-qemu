@@ -87,6 +87,12 @@ struct MgEngine {
     char vm_disk[1024], vm_bus[16], vm_video[64];
     unsigned vm_ram_mb;
     int vm_profile_known;
+    /* The profile of the disk a preflight asked about. It is not the running
+     * VM's profile: asking about another disk while one runs must answer for
+     * the disk that was asked about. */
+    char preflight_disk[1024], preflight_bus[16], preflight_video[64];
+    unsigned preflight_ram_mb;
+    int preflight_known, preflight_image_exists;
 
     char qmp_buffer[LINE_CAP], qmp_reply[LINE_CAP];
 
@@ -2792,9 +2798,20 @@ bstr(&b,e->status.phase);
     bstr(&b,e->cfg.disk_bus);
     bput(&b,",\"iso\":");bstr(&b,e->cfg.iso);
     bput(&b,",\"video\":");bstr(&b,e->cfg.video);
-    bfmt(&b,",\"profile_known\":%s,\"image_exists\":%s},\"ocr\":{\"status\":",
+    bfmt(&b,",\"profile_known\":%s,\"image_exists\":%s}",
         e->vm_profile_known?"true":"false",
         (e->cfg.disk[0]&&mgp_file_size(e->cfg.disk))?"true":"false");
+    /* The profile of the disk a preflight asked about, which is not the disk
+     * the running VM uses. The form reads the memory and the controller of
+     * the disk it names from here. */
+    bput(&b,",\"preflight_disk\":");
+    bstr(&b,e->preflight_disk);
+    bfmt(&b,",\"preflight_ram_mb\":%u,\"preflight_bus\":",e->preflight_ram_mb);
+    bstr(&b,e->preflight_bus);
+    bput(&b,",\"preflight_video\":");
+    bstr(&b,e->preflight_video);
+    bfmt(&b,",\"preflight_known\":%s,\"preflight_image_exists\":%s,\"ocr\":{\"status\":",
+        e->preflight_known?"true":"false",e->preflight_image_exists?"true":"false");
     bstr(&b,ocr_status_name(ocr_status));
     bfmt(&b,",\"generation\":%llu,\"pid\":%llu,\"peak_memory_bytes\":%llu,\"text\":",
          (unsigned long long)e->ocr_generation,(unsigned long long)e->ocr_pid,
@@ -3371,6 +3388,15 @@ goto done;
         bfmt(&ab,",\"profile_known\":%s}",known?"true":"false");
         journal(e,"preflight",ab.error?disk:audited);
         }
+        /* The answer states the profile of the disk that was asked about.
+         * While another VM runs, the running VM's own values are still
+         * reported as the running VM, and they say nothing about this disk. */
+        snprintf(e->preflight_disk,sizeof(e->preflight_disk),"%s",disk);
+        e->preflight_known=known;
+        e->preflight_ram_mb=known?p.ram_mb:0;
+        e->preflight_image_exists=size?1:0;
+        snprintf(e->preflight_bus,sizeof(e->preflight_bus),"%s",known?p.bus:"");
+        snprintf(e->preflight_video,sizeof(e->preflight_video),"%s",known?p.video:"");
         if(known)feedback(e,"Recorded profile for %s: ram_mb=%u, bus=%s, video=%s. Start reuses these exact values; change RAM or bus only when the user asks or the task needs more memory.%s",
             disk,p.ram_mb,p.bus,p.video,size?"":" The disk image itself was not found on this computer.");
         else if(disk[0]&&size)feedback(e,"No recorded profile for %s, but its disk image exists: this VM's memory and disk bus are unknown and start will refuse. Ask the user for ram_mb (the VM's existing memory) and bus (ide, virtio, scsi or nvme), then start with those values. No default is applied.",disk);

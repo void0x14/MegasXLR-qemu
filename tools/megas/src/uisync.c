@@ -95,8 +95,12 @@ int mg_ui_sync(MgUiSyncState *state, const MgUiSyncSource *source)
         state->iso[n] = 0;
         changed = 1;
     }
-    /* Memory and the disk controller belong to the VM. They are adopted from
-     * the engine unless the operator explicitly changed them. */
+    /* Memory and the controller belong to a disk. The engine reports the
+     * ones of the disk it runs, which say nothing about a different disk the
+     * form names, so they are offered only for the disk the form shows.
+     * Reaching here with a matching disk means either the form already named
+     * it or the line above just adopted it. */
+    if (!source->disk[0] || strcmp(state->disk, source->disk)) return changed;
     if (!state->ram_dirty && source->ram_mb >= 64 && source->ram_mb <= 32768 &&
         (unsigned)state->ram != source->ram_mb) {
         state->ram = (int)source->ram_mb;

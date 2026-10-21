@@ -648,6 +648,62 @@ static void test_named_vm_registry(void) {
     mg_engine_free(engine);
     puts("engine: a named VM is registered once, resolves by name, and the configuration follows the started VM");
 }
+static void test_preflight_answers_for_the_disk_asked_about(void) {
+    MgConfig cfg;MgEngine *engine;char runtime[]="/tmp/megas-preflight-XXXXXX",response[65536],request[2048];
+    char control[1024],trace[1024],catalog[1024];FILE *file;int n;
+    assert(mkdtemp(runtime));
+    snprintf(control,sizeof(control),"%s/qmp-control",runtime);
+    snprintf(trace,sizeof(trace),"%s/qmp-trace",runtime);
+    snprintf(catalog,sizeof(catalog),"%s/qmp-catalog",runtime);
+    file=fopen(control,"wb");assert(file);fclose(file);
+    file=fopen(catalog,"wb");assert(file);fclose(file);
+    assert(!setenv("MEGAS_TEST_QMP_MODE","normal",1));
+    assert(!setenv("MEGAS_TEST_QMP_CONTROL",control,1));
+    assert(!setenv("MEGAS_TEST_QMP_TRACE",trace,1));
+    assert(!setenv("MEGAS_TEST_QMP_CATALOG",catalog,1));
+
+    mg_config_defaults(&cfg);
+    snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
+    snprintf(cfg.disk,sizeof(cfg.disk),"%s/known.qcow2",runtime);
+    file=fopen(cfg.disk,"wb");assert(file);fputs("fake qcow2 fixture",file);fclose(file);
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.width=800;cfg.height=600;test_port+=10;
+    engine=mg_engine_new(&cfg);assert(engine);
+
+    /* The first disk is started once, which records its memory and its
+     * controller. */
+    n=snprintf(request,sizeof(request),"{\"action\":\"start\",\"disk\":\"%s\",\"ram_mb\":2048,\"bus\":\"ide\"}",cfg.disk);
+    assert(n>0&&(size_t)n<sizeof(request));
+    assert(!mg_engine_submit(engine,request,response,sizeof(response)));
+    assert(strstr(response,"\"connected\":true"));
+    assert(!mg_engine_submit(engine,"{\"action\":\"stop\"}",response,sizeof(response)));
+
+    /* A second disk runs, with other memory and another controller. */
+    n=snprintf(request,sizeof(request),"%s/other.qcow2",runtime);
+    assert(n>0&&(size_t)n<sizeof(request));
+    file=fopen(request,"wb");assert(file);fputs("another fake qcow2",file);fclose(file);
+    n=snprintf(request,sizeof(request),"{\"action\":\"start\",\"disk\":\"%s/other.qcow2\",\"ram_mb\":4096,\"bus\":\"virtio\"}",runtime);
+    assert(n>0&&(size_t)n<sizeof(request));
+    assert(!mg_engine_submit(engine,request,response,sizeof(response)));
+    assert(strstr(response,"\"connected\":true"));
+
+    /* Asking about the first disk answers for that disk, not for the one
+     * that is running. A form that takes these values would otherwise start
+     * a disk on the controller the running VM happens to use. */
+    n=snprintf(request,sizeof(request),"{\"action\":\"preflight\",\"disk\":\"%s\"}",cfg.disk);
+    assert(n>0&&(size_t)n<sizeof(request));
+    assert(!mg_engine_submit(engine,request,response,sizeof(response)));
+    assert(strstr(response,"\"preflight_known\":true"));
+    assert(strstr(response,"\"preflight_ram_mb\":2048"));
+    assert(strstr(response,"\"preflight_bus\":\"ide\""));
+    /* The running VM still describes itself. */
+    assert(strstr(response,"\"ram_mb\":4096"));
+    assert(strstr(response,"\"disk_bus\":\"virtio\""));
+    mg_engine_free(engine);
+    unsetenv("MEGAS_TEST_QMP_MODE");unsetenv("MEGAS_TEST_QMP_CONTROL");unsetenv("MEGAS_TEST_QMP_TRACE");unsetenv("MEGAS_TEST_QMP_CATALOG");
+    puts("engine: a preflight answers for the disk it was asked about, not for the running VM");
+}
+
 int main(int argc,char **argv) {
     MgConfig cfg;MgEngine *e;char runtime[]="/tmp/megas-engine-XXXXXX",response[65536],request[2048],self[1024],cwd[1024];FILE *file;uint64_t begun;
     if(argc>1)return fake_qemu(argc,argv);
@@ -689,6 +745,7 @@ int main(int argc,char **argv) {
     test_checkpoint_catalog_foreign_never_auto_gc();test_checkpoint_catalog_full_foreign_fails_closed();
     test_checkpoint_catalog_unavailable_keeps_vm();test_checkpoint_catalog_over_limit_keeps_vm();
     test_vm_profile_reuse();
+    test_preflight_answers_for_the_disk_asked_about();
     test_start_refuses_empty_disk();
     test_resize_refused_while_stopped();
     test_config_follows_started_vm();

@@ -267,12 +267,14 @@ static void gui_profile_sync(MgGui *ui)
     ui->preflight_disk[0] = 0;
     (void)mg_engine_submit(ui->engine, request, answer, sizeof(answer));
     gui_wipe(request, sizeof(request));
-    if (!mg_json_has(answer, "profile_known")) return;
+    if (!mg_json_has(answer, "preflight_known")) return;
     snprintf(ui->preflight_disk, sizeof(ui->preflight_disk), "%s", ui->disk);
-    if (mg_json_field_bool(answer, "profile_known", 0)) {
-        ram = mg_json_field_int(answer, "memory_mb", 0);
+    /* The answer carries the profile of the disk that was asked about, which
+     * is not the disk the running VM uses while it runs. */
+    if (mg_json_field_bool(answer, "preflight_known", 0)) {
+        ram = mg_json_field_int(answer, "preflight_ram_mb", 0);
         if (ram >= 64 && ram <= 32768) ui->ram = ram;
-        if (mg_json_field_text(answer, "bus", value, sizeof(value))) {
+        if (mg_json_field_text(answer, "preflight_bus", value, sizeof(value))) {
             int i;
             for (i = 0; i < 4; ++i) if (!strcmp(value, gui_bus_names[i])) ui->bus_selected = i;
             snprintf(ui->bus, sizeof(ui->bus), "%s", gui_bus_names[ui->bus_selected]);
@@ -281,7 +283,7 @@ static void gui_profile_sync(MgGui *ui)
     } else {
         /* Unknown profile: only a disk image that already exists can hide a
          * different memory or controller, so that case waits for an answer. */
-        ui->profile_missing = ui->disk[0] && mg_json_field_bool(answer, "image_exists", 0);
+        ui->profile_missing = ui->disk[0] && mg_json_field_bool(answer, "preflight_image_exists", 0);
     }
 }
 
