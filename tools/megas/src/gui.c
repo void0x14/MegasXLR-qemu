@@ -104,7 +104,12 @@ static const char *tr(const char *turkish, const char *english)
 
 static void gui_note(MgGui *ui, const char *message)
 {
+    const MgStatus *status = mg_engine_status(ui->engine);
     snprintf(ui->feedback, sizeof(ui->feedback), "%s", message);
+    /* The engine's last answer is the baseline now. Without this, an answer
+     * that arrived before the window chose its own message replaces that
+     * message a frame later, and the operator never reads it. */
+    snprintf(ui->seen_feedback, sizeof(ui->seen_feedback), "%s", status->feedback);
 }
 
 /* Keep short-lived guest passwords out of stale editor/request buffers. */
@@ -182,50 +187,6 @@ static void gui_named(MgGui *ui, const char *action, const char *name)
     if (!json_string(value, sizeof(value), name)) return;
     snprintf(request, sizeof(request), "{\"action\":\"%s\",\"name\":%s}", action, value);
     gui_queue(ui, request);
-}
-
-static const char *gui_field_start(const char *text, const char *key)
-{
-    char needle[64];
-    snprintf(needle, sizeof(needle), "\"%s\":", key);
-    return strstr(text, needle);
-}
-
-static int gui_field_int(const char *text, const char *key, int fallback)
-{
-    const char *field = gui_field_start(text, key);
-    int value = 0, digits = 0;
-    if (!field) return fallback;
-    field += strlen(key) + 2;
-    while (*field == ' ') ++field;
-    while (*field >= '0' && *field <= '9' && value < 100000000) {
-        value = value * 10 + (*field - '0'); ++field; digits = 1;
-    }
-    return digits ? value : fallback;
-}
-
-static int gui_field_bool(const char *text, const char *key, int fallback)
-{
-    const char *field = gui_field_start(text, key);
-    if (!field) return fallback;
-    field += strlen(key) + 2;
-    return !strncmp(field, "true", 4);
-}
-
-static int gui_field_text(const char *text, const char *key, char *out, size_t cap)
-{
-    const char *field = gui_field_start(text, key);
-    size_t used = 0;
-    if (!field) return 0;
-    field += strlen(key) + 2;
-    if (*field != '"') return 0;
-    ++field;
-    while (*field && *field != '"' && used + 1 < cap) {
-        if (*field == '\\' && field[1]) ++field;
-        out[used++] = *field++;
-    }
-    out[used] = 0;
-    return 1;
 }
 
 /* The engine owns the running VM's identity. After every action the form
@@ -306,12 +267,12 @@ static void gui_profile_sync(MgGui *ui)
     ui->preflight_disk[0] = 0;
     (void)mg_engine_submit(ui->engine, request, answer, sizeof(answer));
     gui_wipe(request, sizeof(request));
-    if (!gui_field_start(answer, "profile_known")) return;
+    if (!mg_json_has(answer, "profile_known")) return;
     snprintf(ui->preflight_disk, sizeof(ui->preflight_disk), "%s", ui->disk);
-    if (gui_field_bool(answer, "profile_known", 0)) {
-        ram = gui_field_int(answer, "memory_mb", 0);
+    if (mg_json_field_bool(answer, "profile_known", 0)) {
+        ram = mg_json_field_int(answer, "memory_mb", 0);
         if (ram >= 64 && ram <= 32768) ui->ram = ram;
-        if (gui_field_text(answer, "bus", value, sizeof(value))) {
+        if (mg_json_field_text(answer, "bus", value, sizeof(value))) {
             int i;
             for (i = 0; i < 4; ++i) if (!strcmp(value, gui_bus_names[i])) ui->bus_selected = i;
             snprintf(ui->bus, sizeof(ui->bus), "%s", gui_bus_names[ui->bus_selected]);
@@ -320,7 +281,7 @@ static void gui_profile_sync(MgGui *ui)
     } else {
         /* Unknown profile: only a disk image that already exists can hide a
          * different memory or controller, so that case waits for an answer. */
-        ui->profile_missing = ui->disk[0] && gui_field_bool(answer, "image_exists", 0);
+        ui->profile_missing = ui->disk[0] && mg_json_field_bool(answer, "image_exists", 0);
     }
 }
 

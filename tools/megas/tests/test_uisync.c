@@ -233,6 +233,40 @@ static void test_the_field_and_the_editor_copy_never_diverge(void)
     puts("uisync: the field and the editor's copy of it never diverge");
 }
 
+static void test_the_answer_fields_are_read(void)
+{
+    const char *answer = "{\"ok\":true,\"profile_known\":true,\"image_exists\":true,"
+        "\"memory_mb\":4096,\"bus\":\"ide\",\"video\":\"VGA\","
+        "\"disk\":\"/home/u/.local/share/megas/vms/winlpe.qcow2\"}";
+    char text[256];
+    /* The answer is read one character past the colon. Landing on the colon
+     * instead made every field look absent, and the form fell back to
+     * guessing what the VM was. */
+    assert(mg_json_has(answer, "profile_known") == 1);
+    assert(mg_json_field_bool(answer, "profile_known", 0) == 1);
+    assert(mg_json_field_bool(answer, "image_exists", 0) == 1);
+    assert(mg_json_field_int(answer, "memory_mb", 0) == 4096);
+    assert(mg_json_field_text(answer, "bus", text, sizeof(text)) == 1);
+    assert(strcmp(text, "ide") == 0);
+    assert(mg_json_field_text(answer, "video", text, sizeof(text)) == 1);
+    assert(strcmp(text, "VGA") == 0);
+    assert(mg_json_field_text(answer, "disk", text, sizeof(text)) == 1);
+    assert(strcmp(text, "/home/u/.local/share/megas/vms/winlpe.qcow2") == 0);
+    /* A field the answer does not carry leaves the fallback in place. */
+    assert(mg_json_has(answer, "missing") == 0);
+    assert(mg_json_field_int(answer, "missing", 7) == 7);
+    assert(mg_json_field_bool(answer, "missing", 1) == 1);
+    assert(mg_json_field_text(answer, "missing", text, sizeof(text)) == 0);
+    /* A field that is present and false is read as false, not as absent. */
+    {
+        const char *negative = "{\"profile_known\":false,\"image_exists\":false}";
+        assert(mg_json_has(negative, "profile_known") == 1);
+        assert(mg_json_field_bool(negative, "profile_known", 1) == 0);
+        assert(mg_json_field_bool(negative, "image_exists", 1) == 0);
+    }
+    puts("uisync: every field of the controller's answer is read at its value");
+}
+
 int main(void)
 {
     test_agent_start_fills_the_form();
@@ -246,6 +280,7 @@ int main(void)
     test_unknown_bus_is_not_adopted();
     test_named_vm_fills_the_form();
     test_the_field_and_the_editor_copy_never_diverge();
+    test_the_answer_fields_are_read();
     puts("uisync: all controller state rules passed");
     return 0;
 }

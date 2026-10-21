@@ -16,6 +16,58 @@ static const char *ui_known_bus(const char *bus)
     return NULL;
 }
 
+/* The needle is the key in quotes followed by its colon, so the value starts
+ * one character past the colon: one quote, the key, one quote, the colon. */
+static const char *ui_field_start(const char *text, const char *key)
+{
+    char needle[64];
+    if (!text || !key) return NULL;
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    return strstr(text, needle);
+}
+
+int mg_json_has(const char *text, const char *key)
+{
+    return ui_field_start(text, key) != NULL;
+}
+
+int mg_json_field_int(const char *text, const char *key, int fallback)
+{
+    const char *field = ui_field_start(text, key);
+    int value = 0, digits = 0;
+    if (!field) return fallback;
+    field += strlen(key) + 3;
+    while (*field == ' ') ++field;
+    while (*field >= '0' && *field <= '9' && value < 100000000) {
+        value = value * 10 + (*field - '0'); ++field; digits = 1;
+    }
+    return digits ? value : fallback;
+}
+
+int mg_json_field_bool(const char *text, const char *key, int fallback)
+{
+    const char *field = ui_field_start(text, key);
+    if (!field) return fallback;
+    field += strlen(key) + 3;
+    return !strncmp(field, "true", 4);
+}
+
+int mg_json_field_text(const char *text, const char *key, char *out, size_t capacity)
+{
+    const char *field = ui_field_start(text, key);
+    size_t used = 0;
+    if (!field || !out || !capacity) return 0;
+    field += strlen(key) + 3;
+    if (*field != '"') return 0;
+    ++field;
+    while (*field && *field != '"' && used + 1 < capacity) {
+        if (*field == '\\' && field[1]) ++field;
+        out[used++] = *field++;
+    }
+    out[used] = 0;
+    return 1;
+}
+
 int mg_ui_sync(MgUiSyncState *state, const MgUiSyncSource *source)
 {
     int changed = 0;

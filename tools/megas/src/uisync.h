@@ -7,6 +7,13 @@
 
 #include <stddef.h>
 
+/* The controller answers in JSON. These read one field out of an answer; a
+ * field that is not there leaves the caller's fallback in place. */
+int mg_json_has(const char *text, const char *key);
+int mg_json_field_int(const char *text, const char *key, int fallback);
+int mg_json_field_bool(const char *text, const char *key, int fallback);
+int mg_json_field_text(const char *text, const char *key, char *out, size_t capacity);
+
 /* The form fields the controller reconciles with the engine. */
 typedef struct {
     char disk[1024];
