@@ -20,3 +20,6 @@ GTAGS
 *.swp
 *.patch
 *.gcov
+tools/megas/build-da/
+tools/megas/build-*/
+.opencode/

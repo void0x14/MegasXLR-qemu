@@ -16,7 +16,7 @@ int mg_interrupted(void){return closing != 0;}
 static void stop_signal(int signal_number){(void)signal_number;closing=1;}
 static void json_string(const char *s){const unsigned char *p=(const unsigned char*)s;putchar('"');while(*p){switch(*p){case '"':fputs("\\\"",stdout);break;case '\\':fputs("\\\\",stdout);break;case '\n':fputs("\\n",stdout);break;case '\r':fputs("\\r",stdout);break;case '\t':fputs("\\t",stdout);break;default:if(*p<32)printf("\\u%04x",*p);else putchar(*p);}p++;}putchar('"');}
 static int value(const char *s,unsigned *out){char *end;unsigned long n;errno=0;n=strtoul(s,&end,10);if(errno||*end||n<1||n>65535)return -1;*out=(unsigned)n;return 0;}
-static void usage(void){puts("Megas — native VM owner and agent control\n\nmegas [--runtime DIR] [--port PORT] [--qmp-port PORT] [--vnc-port PORT] gui|serve\nmegas [options] status|steps|repair|pause|resume|stop\nmegas [options] send '{\"action\":\"start\",\"disk\":\"work.qcow2\"}'\nmegas [options] agent [--text-only]\nmegas [options] hook SessionStart|PreToolUse|PostToolUse|UserPromptSubmit\n\nCommands always return current VM state and latest live image/fallback.\nThe controller owns QEMU; its process and commands are audited in actions.jsonl.");}
+static void usage(void){puts("Megas — native VM owner and agent control\n\nmegas [--runtime DIR] [--port PORT] [--qmp-port PORT] [--vnc-port PORT] [--qga-port PORT] gui|serve\nmegas [options] status|steps|repair|pause|resume|stop\nmegas [options] send '{\"action\":\"start\",\"disk\":\"work.qcow2\"}'\nmegas [options] agent [--text-only]\nmegas [options] hook SessionStart|PreToolUse|PostToolUse|UserPromptSubmit\n\nCommands always return current VM state and latest live image/fallback.\nThe controller owns QEMU; its process and commands are audited in actions.jsonl.");}
 static int is_native_megas_command(const char *cmd) {
     if (!cmd) return 0;
     return (!strcmp(cmd, "gui") ||
@@ -70,6 +70,10 @@ static int mg_main(int argc,char **argv){
         } else if (!strcmp(argv[i], "--vnc-port")) {
             i++; if (i >= argc) { usage(); return 2; }
             if (value(argv[i], &cfg.vnc_port) || cfg.vnc_port < 5900) return 2;
+            i++;
+        } else if (!strcmp(argv[i], "--qga-port")) {
+            i++; if (i >= argc) { usage(); return 2; }
+            if (value(argv[i], &cfg.qga_port)) return 2;
             i++;
         } else {
             break;

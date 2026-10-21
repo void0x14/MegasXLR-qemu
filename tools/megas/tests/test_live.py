@@ -233,8 +233,24 @@ def main():
     parser.add_argument('--workdir', help='Retain a named test directory for forensic inspection')
     args = parser.parse_args()
     binary = Path(args.binary).resolve()
-    qemu = shutil.which(args.qemu)
-    qemu_img = shutil.which(args.qemu_img)
+    def real_binary(candidates, fallback):
+        # The package intercepts qemu-system-x86_64 on PATH, so the live test
+        # names a real emulator instead of the interception wrapper.
+        for candidate in candidates:
+            path = Path(candidate)
+            if not path.is_file() or not os.access(path, os.X_OK):
+                continue
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved.name.startswith('megas'):
+                continue
+            return str(path)
+        return shutil.which(fallback)
+    qemu = real_binary(('/usr/lib/megas/qemu-system-x86_64.bin', '/usr/bin/qemu-system-x86_64'),
+                       args.qemu)
+    qemu_img = real_binary(('/usr/bin/qemu-img',), args.qemu_img)
     tesseract = shutil.which(os.environ.get('MEGAS_TESSERACT', 'tesseract'))
     require(binary.is_file(), f'Controller binary missing: {binary}')
     require(qemu and qemu_img, 'Install test dependencies qemu-system-x86_64 and qemu-img')
@@ -258,6 +274,12 @@ def main():
         context = contextlib.nullcontext(args.workdir) if args.workdir else tempfile.TemporaryDirectory(prefix='megas-live-')
         with context as directory:
             runtime = Path(directory)
+            # The named VM registry lives under HOME, so the live test never
+            # writes into the home directory of the person running it.
+            home = runtime / 'home'
+            home.mkdir(exist_ok=True)
+            os.environ['HOME'] = str(home)
+            os.environ['XDG_CONFIG_HOME'] = str(home / '.config')
             raw = runtime / 'guest.raw'
             disk = runtime / 'guest.qcow2'
             with raw.open('wb') as file:
@@ -265,9 +287,10 @@ def main():
                 file.truncate(4 * 1024 * 1024)
             subprocess.run([qemu_img, 'convert', '-f', 'raw', '-O', 'qcow2', str(raw), str(disk)],
                            check=True, capture_output=True)
-            control_port, qmp_port, vnc_port = available_ports(3)
+            control_port, qmp_port, vnc_port, qga_port = available_ports(4)
             common = [str(binary), '--runtime', str(runtime), '--port', str(control_port),
-                      '--qmp-port', str(qmp_port), '--vnc-port', str(vnc_port)]
+                      '--qmp-port', str(qmp_port), '--vnc-port', str(vnc_port),
+                      '--qga-port', str(qga_port)]
             owner_log = (runtime / 'owner.log').open('w')
             owner = subprocess.Popen(common + ['serve'], stdout=owner_log, stderr=owner_log)
             token = runtime / f'session-{control_port}.token'
@@ -358,6 +381,23 @@ def main():
             report['measurements']['owner_live_rss_kib'] = rss_kib(owner.pid, os.getpid())
             report['measurements']['qemu_live_rss_kib'] = rss_kib(owned_pid, owner.pid)
             passed('managed_start_and_continuous_live_display', pid=owned_pid)
+            # The configuration and the reported state describe the VM that
+            # actually started, under the names the desktop form reads.
+            started = send({'action': 'status'})
+            vm = started.get('vm') or {}
+            require(vm.get('disk') == str(disk),
+                    f'Engine config did not report the started disk: {vm.get("disk")!r}')
+            require(vm.get('ram_mb') == 64, f'Engine config reported RAM {vm.get("ram_mb")!r}')
+            require(vm.get('disk_bus') == 'virtio', f'Engine config reported bus {vm.get("disk_bus")!r}')
+            passed('engine_config_follows_started_vm', disk=vm.get('disk'),
+                   ram_mb=vm.get('ram_mb'), disk_bus=vm.get('disk_bus'))
+            registry = home / '.config' / 'megas' / 'vms.json'
+            require(registry.is_file(), 'VM registry was not written after a successful start')
+            require(str(registry).startswith(str(runtime)), 'Registry escaped the test runtime')
+            entries = json.loads(registry.read_text()).get('vms', [])
+            require(any(e.get('disk') == str(disk) for e in entries),
+                    'Started disk is not in the registry')
+            passed('vm_registry_records_started_vm', records=len(entries))
             # Allow the test guest's BIOS to finish booting before fixed-screen assertions.
             time.sleep(1)
             screenshots = {}
@@ -590,9 +630,10 @@ def main():
             wait_for(lambda: not pid_alive(previous_owner_pid),
                      'Previous owner exit orphaned QEMU before catalog handoff')
             owner_log.close()
-            control_port, qmp_port, vnc_port = available_ports(3)
+            control_port, qmp_port, vnc_port, qga_port = available_ports(4)
             common = [str(binary), '--runtime', str(runtime), '--port', str(control_port),
-                      '--qmp-port', str(qmp_port), '--vnc-port', str(vnc_port)]
+                      '--qmp-port', str(qmp_port), '--vnc-port', str(vnc_port),
+                      '--qga-port', str(qga_port)]
             owner_log = (runtime / 'owner-restarted.log').open('w')
             owner = subprocess.Popen(common + ['serve'], stdout=owner_log, stderr=owner_log)
             token = runtime / f'session-{control_port}.token'
@@ -682,9 +723,22 @@ def main():
             send({'action': 'stop'})
             wait_for(lambda: not pid_alive(owned_pid), 'Managed stop orphaned QEMU')
             passed('managed_stop_reaps_qemu_child')
+            # A stopped VM has no display to resize, and the refusal says why.
+            refused = send({'action': 'resize', 'width': 1280, 'height': 720}, ok=False)
+            require(refused.get('ok') is False, 'Resize was accepted while the VM was stopped')
+            require(refused.get('feedback'), 'Refused resize returned no reason')
+            reason = str(refused.get('feedback'))
+            require('stopped' in reason or 'Start the VM' in reason,
+                    f'Refused resize gave no usable reason: {reason!r}')
+            passed('stopped_vm_refuses_resize_with_reason', feedback=reason)
             # Relaunch then kill the owner gracefully: cleanup must also reap this child.
             send({'action': 'start', 'disk': str(disk), 'qemu': qemu, 'ram_mb': 64, 'bus': 'virtio'})
             owned_pid = send({'action': 'status'})['state']['owned_pid']
+            # Restarting the same VM does not open a second registry record.
+            entries = json.loads(registry.read_text()).get('vms', [])
+            matching = [e for e in entries if e.get('disk') == str(disk)]
+            require(len(matching) == 1, f'Restart created {len(matching)} registry records for one disk')
+            passed('one_registry_record_per_vm')
             owner.terminate()
             owner.wait(timeout=10)
             wait_for(lambda: not pid_alive(owned_pid), 'Owner exit orphaned QEMU')

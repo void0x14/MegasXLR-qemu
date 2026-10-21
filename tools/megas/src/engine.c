@@ -1342,8 +1342,10 @@ if(n>maximum)n=maximum;
 for(i=0;i<n;i++)strcpy(names[i],e->snapshots[i].name);
 return n;
 }
-static int config_string(Json *j,const char *key,char *target,size_t cap){int i=jget(j,0,key);
+static int record_string(Json *j,int parent,const char *key,char *target,size_t cap){int i=jget(j,parent,key);
 return i<0?0:jstring(j,i,target,cap);
+}
+static int config_string(Json *j,const char *key,char *target,size_t cap){return record_string(j,0,key,target,cap);
 }
 typedef struct {
     unsigned ram_mb, width, height;
@@ -1516,14 +1518,56 @@ static void argv_disk(char *out, size_t cap, char *const argv[], int n) {
         }
     }
 }
+/* Installation media named by an intercepted command line. */
+static void argv_cdrom(char *out, size_t cap, char *const argv[], int n) {
+    int i;
+    out[0] = 0;
+    for (i = 1; i < n; i++) {
+        if ((!strcmp(argv[i], "-cdrom") || !strcmp(argv[i], "-cdfile")) &&
+            i + 1 < n && argv[i + 1][0] != '-') {
+            snprintf(out, cap, "%s", argv[i + 1]);
+            return;
+        }
+    }
+    for (i = 1; i < n; i++) {
+        const char *file = strstr(argv[i], "file=");
+        if (file && (strstr(argv[i], "media=cdrom") || strstr(argv[i], "if=cdrom"))) {
+            size_t len = strcspn(file + 5, ",");
+            if (len >= cap) len = cap - 1;
+            memcpy(out, file + 5, len);
+            out[len] = 0;
+            return;
+        }
+    }
+}
+/* Host port forwards named by an intercepted command line, kept for the
+ * registry so a VM can be restarted the way its owner starts it. */
+static void argv_forwards(char *out, size_t cap, char *const argv[], int n) {
+    size_t used = 0;
+    int i;
+    out[0] = 0;
+    for (i = 1; i < n && used + 1 < cap; i++) {
+        const char *found = strstr(argv[i], "hostfwd=");
+        size_t len;
+        if (!found) continue;
+        len = strcspn(found + 8, ",");
+        if (len >= cap - used - 1) len = cap - used - 1;
+        if (used) out[used++] = ',';
+        memcpy(out + used, found + 8, len);
+        used += len;
+        out[used] = 0;
+    }
+}
 /* Effective RAM, disk bus, video device and disk path of a start request.
  * Values come from the request, from the intercepted raw command line, or
  * from the profile recorded for that exact disk. Nothing is invented: an
  * unresolvable value returns -1 with the reason the caller must show, so a
- * caller that must ask the user (the agent) is stopped instead of guessing. */
-static int resolve_start(MgEngine *e, Json *j, VmProfile *p, char *reason, size_t reason_cap) {
+ * caller that must ask the user (the agent) is stopped instead of guessing.
+ * ask_user, when given, reports that the refusal names what to ask. */
+static int resolve_start(MgEngine *e, Json *j, VmProfile *p, char *reason, size_t reason_cap, int *ask_user) {
     VmProfile recorded;
     int have_recorded, same_vm, explicit_ram, explicit_bus;
+    if(ask_user)*ask_user=0;
     memset(p, 0, sizeof(*p));
     {
         char *argv[512];
@@ -1549,6 +1593,14 @@ static int resolve_start(MgEngine *e, Json *j, VmProfile *p, char *reason, size_
     }
     explicit_ram = jget(j, 0, "ram_mb") >= 0;
     explicit_bus = jget(j, 0, "bus") >= 0 || jget(j, 0, "disk_bus") >= 0;
+    /* Nothing can boot without a disk image or installation media, so the
+     * start is refused here instead of opening an empty machine whose bus
+     * would then fall back to a controller the VM never had. */
+    if (!p->disk[0] && !e->cfg.iso[0]) {
+        snprintf(reason, reason_cap,
+            "Refused to start: this VM names no disk image and no installation media. A VM cannot boot without a disk or an ISO. Choose the disk image of the VM you want to run, create one with the create action, or attach the installation ISO.");
+        return -1;
+    }
     same_vm = !strcmp(p->disk, e->vm_disk);
     have_recorded = profile_load(e, p->disk, &recorded) == 0;
     if (explicit_ram) {
@@ -1565,6 +1617,7 @@ static int resolve_start(MgEngine *e, Json *j, VmProfile *p, char *reason, size_
         p->ram_mb = 0;
     }
     if (!p->ram_mb) {
+        if(ask_user)*ask_user=1;
         snprintf(reason, reason_cap,
             "VM memory is not established%s. Run preflight, ask the user for ram_mb equal to that VM's existing memory, then start with it. The controller never guesses memory and never reuses another disk's memory.",
             p->disk[0] ? " for this disk" : " for a VM without a disk");
@@ -1576,6 +1629,7 @@ static int resolve_start(MgEngine *e, Json *j, VmProfile *p, char *reason, size_
             return -1;
         }
         if (strcmp(p->bus, "ide") && strcmp(p->bus, "virtio") && strcmp(p->bus, "scsi") && strcmp(p->bus, "nvme")) {
+            if(ask_user)*ask_user=1;
             snprintf(reason, reason_cap, "Choose bus ide, virtio, scsi or nvme; the disk controller is never changed silently.");
             return -1;
         }
@@ -1584,6 +1638,7 @@ static int resolve_start(MgEngine *e, Json *j, VmProfile *p, char *reason, size_
     } else if (same_vm && e->vm_bus[0]) {
         snprintf(p->bus, sizeof(p->bus), "%s", e->vm_bus);
     } else if (p->disk[0]) {
+        if(ask_user)*ask_user=1;
         snprintf(reason, reason_cap,
             "Disk bus is not established for this disk. Run preflight, ask the user for bus (ide, virtio, scsi or nvme) matching the disk's existing controller, then start with it. An existing disk is never reattached silently.");
         return -1;
@@ -1611,7 +1666,7 @@ static void start_effective_text(MgEngine *e, Json *j, char *out, size_t cap) {
     VmProfile p; char reason[512]; Buffer b;
     out[0] = 0;
     binit(&b, out, cap);
-    if (resolve_start(e, j, &p, reason, sizeof(reason))) {
+    if (resolve_start(e, j, &p, reason, sizeof(reason), NULL)) {
         bput(&b, ",\"effective_ram_mb\":0,\"preflight\":\"required\",\"unresolved\":");
         bstr(&b, reason);
     } else {
@@ -1638,6 +1693,145 @@ static int parent_path(char *path)
 #endif
     else *slash = 0;
     return 0;
+}
+/* The registry is the name index a person uses for their VMs. It never
+ * replaces the profile recorded for a disk: it only makes a VM reachable by
+ * the name its owner calls it, and an unreadable registry is never fatal. */
+#define VM_REGISTRY_CAP 32
+typedef struct {
+    char name[64], disk[1024], bus[16], video[64], iso[1024], forwards[256];
+    unsigned ram_mb;
+    uint64_t last_boot;
+} VmRecord;
+
+static int registry_path(char *out, size_t cap) {
+    char home[1024];
+#ifdef _WIN32
+    if (mgp_env("LOCALAPPDATA", home, sizeof(home)) && mgp_env("HOME", home, sizeof(home))) return -1;
+    if (!home[0]) return -1;
+    if (snprintf(out, cap, "%.900s\\Megas\\vms.json", home) >= (int)cap) return -1;
+#else
+    if (mgp_env("HOME", home, sizeof(home)) || !home[0]) return -1;
+    if (snprintf(out, cap, "%.900s/.config/megas/vms.json", home) >= (int)cap) return -1;
+#endif
+    return 0;
+}
+static size_t registry_load(VmRecord *out, size_t maximum) {
+    char path[1024], text[65536];
+    FILE *file; size_t n, count = 0; Json *j; int array, k;
+    memset(out, 0, maximum * sizeof(*out));
+    if (registry_path(path, sizeof(path))) return 0;
+    file = mgp_fopen(path, "rb"); if (!file) return 0;
+    n = fread(text, 1, sizeof(text) - 1, file); fclose(file); text[n] = 0;
+    j = malloc(sizeof(*j)); if (!j) return 0;
+    if (jparse(j, text) || j->n < 1 || j->t[0].type != '{') { free(j); return 0; }
+    array = jget(j, 0, "vms");
+    if (array >= 0) for (k = array + 1; k < j->n && count < maximum; k++) {
+        VmRecord *r = &out[count];
+        if (j->t[k].parent != array || j->t[k].type != '{') continue;
+        record_string(j, k, "name", r->name, sizeof(r->name));
+        record_string(j, k, "disk", r->disk, sizeof(r->disk));
+        record_string(j, k, "bus", r->bus, sizeof(r->bus));
+        record_string(j, k, "video", r->video, sizeof(r->video));
+        record_string(j, k, "iso", r->iso, sizeof(r->iso));
+        record_string(j, k, "forwards", r->forwards, sizeof(r->forwards));
+        jnumber(j, jget(j, k, "ram_mb"), &r->ram_mb);
+        juint64(j, jget(j, k, "last_boot"), &r->last_boot);
+        if (r->name[0] && r->disk[0]) count++;
+    }
+    free(j);
+    return count;
+}
+static int registry_store(const VmRecord *records, size_t count) {
+    char path[1024], directory[1024], tmp[1100], text[65536];
+    Buffer b; FILE *file; size_t i; int bad = 0;
+    if (registry_path(path, sizeof(path))) return -1;
+    snprintf(directory, sizeof(directory), "%.1000s", path);
+    if (parent_path(directory) || mgp_mkdir(directory)) return -1;
+    if (snprintf(tmp, sizeof(tmp), "%.1000s.tmp", path) >= (int)sizeof(tmp)) return -1;
+    binit(&b, text, sizeof(text));
+    bput(&b, "{\"vms\":[");
+    for (i = 0; i < count; i++) {
+        if (i) bput(&b, ",");
+        bput(&b, "{\"name\":"); bstr(&b, records[i].name);
+        bput(&b, ",\"disk\":"); bstr(&b, records[i].disk);
+        bfmt(&b, ",\"ram_mb\":%u,\"bus\":", records[i].ram_mb); bstr(&b, records[i].bus);
+        bput(&b, ",\"iso\":"); bstr(&b, records[i].iso);
+        bput(&b, ",\"forwards\":"); bstr(&b, records[i].forwards);
+        bfmt(&b, ",\"last_boot\":%llu}", (unsigned long long)records[i].last_boot);
+    }
+    bput(&b, "]}");
+    if (b.error) return -1;
+    file = mgp_fopen(tmp, "wb"); if (!file) return -1;
+    if (fwrite(text, 1, b.n, file) != b.n) bad = 1;
+    if (fflush(file)) bad = 1;
+    if (fclose(file)) bad = 1;
+    if (bad) { mgp_remove(tmp); return -1; }
+    if (mgp_replace(tmp, path)) { mgp_remove(tmp); return -1; }
+    return 0;
+}
+/* The name an owner would call this VM: what they asked for, otherwise the
+ * disk's own name without its image extension. */
+static void vm_record_name(char *out, size_t cap, const char *disk, const char *iso) {
+    const char *base = strrchr(disk, '/');
+    const char *dot;
+    size_t len;
+#ifdef _WIN32
+    const char *back = strrchr(disk, '\\');
+    if (back && (!base || back > base)) base = back;
+#endif
+    if (!base && !iso[0]) { out[0] = 0; return; }
+    if (!base || !base[1]) base = strrchr(iso, '/');
+#ifdef _WIN32
+    if (!base || !base[1]) {
+        const char *iback = strrchr(iso, '\\');
+        if (iback && (!base || iback > base)) base = iback;
+    }
+#endif
+    base = base ? base + 1 : disk;
+    dot = strrchr(base, '.');
+    len = dot && dot != base ? (size_t)(dot - base) : strlen(base);
+    if (len > cap - 1) len = cap - 1;
+    memcpy(out, base, len);
+    out[len] = 0;
+}
+/* One record per VM. A name the owner gives owns that record; a start that
+ * shows a disk already in the registry joins that record instead of opening a
+ * second one, so a VM is never listed twice under two names. */
+static void registry_upsert(MgEngine *e, const VmRecord *record, int named) {
+    VmRecord records[VM_REGISTRY_CAP], merged;
+    size_t count, i, kept = 0;
+    long target = -1, newest = -1;
+    if (!record->name[0] || !record->disk[0]) return;
+    count = registry_load(records, VM_REGISTRY_CAP);
+    for (i = 0; i < count; i++) if (!strcmp(records[i].name, record->name)) { target = (long)i; break; }
+    if (target < 0) {
+        for (i = 0; i < count; i++) if (!strcmp(records[i].disk, record->disk)) {
+            if (newest < 0 || records[i].last_boot > records[newest].last_boot) newest = (long)i;
+        }
+        target = newest;
+    }
+    merged = *record;
+    if (!named && target >= 0) {
+        size_t nlen = 0;
+        while (nlen + 1 < sizeof(merged.name) && records[target].name[nlen]) nlen++;
+        memcpy(merged.name, records[target].name, nlen);
+        merged.name[nlen] = 0;
+    }
+    for (i = 0; i < count; i++) {
+        if (target >= 0 && (long)i == target) continue;
+        if (!strcmp(records[i].name, merged.name)) continue;
+        if (!strcmp(records[i].disk, record->disk)) continue;
+        if (kept < VM_REGISTRY_CAP) records[kept++] = records[i];
+    }
+    if (kept < VM_REGISTRY_CAP) records[kept++] = merged;
+    else {
+        size_t oldest = 0;
+        for (i = 1; i < kept; i++) if (records[i].last_boot < records[oldest].last_boot) oldest = i;
+        records[oldest] = merged;
+    }
+    if (registry_store(records, kept)) journal(e, "registry_write_failed",
+        "The named VM registry could not be written; this disk keeps its recorded profile only.");
 }
 static void discover_package(void)
 {
@@ -1992,10 +2186,41 @@ static void ocr_tick(MgEngine *e)
         (unsigned long long)e->ocr_peak_memory); journal(e, "ocr_complete", detail); }
     feedback(e, "%s", e->ocr_message);
 }
+/* The configuration a refused start must not change: the controller keeps
+ * describing the VM it runs, never the one it failed to start. */
+typedef struct {
+    char disk[1024], iso[1024], seed_iso[1024], bus[16], video[64];
+    unsigned ram_mb, width, height;
+    int passwordless;
+} VmConfigState;
+static void config_state_save(MgEngine *e, VmConfigState *s) {
+    snprintf(s->disk, sizeof(s->disk), "%s", e->cfg.disk);
+    snprintf(s->iso, sizeof(s->iso), "%s", e->cfg.iso);
+    snprintf(s->seed_iso, sizeof(s->seed_iso), "%s", e->cfg.seed_iso);
+    snprintf(s->bus, sizeof(s->bus), "%s", e->cfg.disk_bus);
+    snprintf(s->video, sizeof(s->video), "%s", e->cfg.video);
+    s->ram_mb = e->cfg.ram_mb;
+    s->width = e->cfg.width;
+    s->height = e->cfg.height;
+    s->passwordless = e->cfg.passwordless;
+}
+static void config_state_restore(MgEngine *e, const VmConfigState *s) {
+    snprintf(e->cfg.disk, sizeof(e->cfg.disk), "%s", s->disk);
+    snprintf(e->cfg.iso, sizeof(e->cfg.iso), "%s", s->iso);
+    snprintf(e->cfg.seed_iso, sizeof(e->cfg.seed_iso), "%s", s->seed_iso);
+    snprintf(e->cfg.disk_bus, sizeof(e->cfg.disk_bus), "%s", s->bus);
+    snprintf(e->cfg.video, sizeof(e->cfg.video), "%s", s->video);
+    e->cfg.ram_mb = s->ram_mb;
+    e->cfg.width = s->width;
+    e->cfg.height = s->height;
+    e->cfg.passwordless = s->passwordless;
+}
 static int vm_start(MgEngine *e,Json *j) {
-    char qmp[128],vnc[128],qga[160],memory[32],video[128],disk[4096],cdrom[4096],seed_file[4096],seed_raw[512],seed_path[1024],username[33],password[257]="",bios[1024],error[512],data_dir[1024],helpers[1024];
+    char qmp[128],vnc[128],qga[160],memory[32],video[128],disk[4096],cdrom[4096],seed_file[4096],seed_raw[512],seed_path[1024],username[33],password[257]="",bios[1024],error[512],data_dir[1024],helpers[1024],forwards[256]="";
     VmProfile profile;
+    VmConfigState saved;
     char unresolved[512];
+int ask_user=0;
 
     char *argv[512];
 int n=0;
@@ -2003,9 +2228,11 @@ Buffer b;
     const char *extension;
 char checkpoint_status[192]="";
 int login_enabled=e->cfg.passwordless;
-#define VM_START_FAIL() do { wipe_memory(password,sizeof(password)); return -1; } while (0)
+#define VM_START_FAIL() do { wipe_memory(password,sizeof(password)); config_state_restore(e,&saved); return -1; } while (0)
+#define VM_START_ABORT() do { wipe_memory(password,sizeof(password)); return -1; } while (0)
 
     memset(&profile, 0, sizeof(profile));
+    config_state_save(e, &saved);
 
     if(e->status.owned_pid&&mgp_alive(&e->process)){
         if(e->status.connected){feedback(e,"VM is already running; its current state is returned.");return 0;}
@@ -2107,7 +2334,10 @@ int login_enabled=e->cfg.passwordless;
                     e->cfg.disk[0] = 0;
                     e->cfg.disk_bus[0] = 0;
                     e->cfg.video[0] = 0;
+                    e->cfg.iso[0] = 0;
                     argv_disk(e->cfg.disk, sizeof(e->cfg.disk), argv, n);
+                    argv_cdrom(e->cfg.iso, sizeof(e->cfg.iso), argv, n);
+                    argv_forwards(forwards, sizeof(forwards), argv, n);
                     e->cfg.ram_mb = actual_ram ? actual_ram : 128;
                     if (profile.bus[0]) snprintf(e->cfg.disk_bus, sizeof(e->cfg.disk_bus), "%s", profile.bus);
                     if (profile.video[0]) snprintf(e->cfg.video, sizeof(e->cfg.video), "%s", profile.video);
@@ -2117,7 +2347,11 @@ int login_enabled=e->cfg.passwordless;
                     snprintf(profile.disk, sizeof(profile.disk), "%s", e->cfg.disk);
                     snprintf(profile.bus, sizeof(profile.bus), "%s", e->cfg.disk_bus);
                     snprintf(profile.video, sizeof(profile.video), "%s", e->cfg.video);
-                    e->vm_profile_known = 1;
+                    if (!e->cfg.disk[0] && !e->cfg.iso[0]) {
+                        journal(e, "start_refused", "The intercepted QEMU command line names no disk image and no installation media.");
+                        feedback(e, "Refused to start: the intercepted command line names no disk image and no installation media. A VM cannot boot without a disk or an ISO.");
+                        VM_START_FAIL();
+                    }
                 }
                 goto spawn_vm;
             }
@@ -2132,20 +2366,24 @@ VM_START_FAIL();
         snprintf(e->cfg.qemu, sizeof(e->cfg.qemu), "%s", resolved_qemu);
     }
     snprintf(username,sizeof(username),"megas");
-    if(config_string(j,"username",username,sizeof(username))||config_string(j,"password",password,sizeof(password))){feedback(e,"Guest username or password exceeds its supported size.");wipe_memory(password,sizeof(password));return -1;}
+    if(config_string(j,"username",username,sizeof(username))||config_string(j,"password",password,sizeof(password))){feedback(e,"Guest username or password exceeds its supported size.");VM_START_FAIL();}
     {int policy=jget(j,0,"passwordless");
         if(policy>=0){if(jeq(j,policy,"true"))login_enabled=1;
             else if(jeq(j,policy,"false"))login_enabled=0;
             else {feedback(e,"passwordless must be a JSON boolean.");VM_START_FAIL();}}
     }
-    if(login_enabled&&password[0]){feedback(e,"Omit password when enabling passwordless sign-in; no guest command was sent.");wipe_memory(password,sizeof(password));return -1;}
-    if(!login_enabled&&!password[0]){feedback(e,"A new managed guest starts with a locked account. Choose passwordless sign-in or provide a password before starting.");wipe_memory(password,sizeof(password));return -1;}
+    if(login_enabled&&password[0]){feedback(e,"Omit password when enabling passwordless sign-in; no guest command was sent.");VM_START_FAIL();}
+    if(!login_enabled&&!password[0]){feedback(e,"A new managed guest starts with a locked account. Choose passwordless sign-in or provide a password before starting.");VM_START_FAIL();}
     e->cfg.passwordless=login_enabled;
-    if (resolve_start(e, j, &profile, unresolved, sizeof(unresolved))) {
-        journal(e, "preflight_required", unresolved);
+    if (resolve_start(e, j, &profile, unresolved, sizeof(unresolved), &ask_user)) {
+        journal(e, "start_refused", unresolved);
+        if (ask_user) journal(e, "preflight_required", unresolved);
         feedback(e, "%s", unresolved);
         VM_START_FAIL();
     }
+    /* The resolved values are the VM's own configuration, so the controller's
+     * view of itself follows them exactly. */
+    snprintf(e->cfg.disk, sizeof(e->cfg.disk), "%s", profile.disk);
     e->cfg.ram_mb = profile.ram_mb;
     snprintf(e->cfg.disk_bus, sizeof(e->cfg.disk_bus), "%s", profile.bus);
     snprintf(e->cfg.video, sizeof(e->cfg.video), "%s", profile.video);
@@ -2156,9 +2394,9 @@ VM_START_FAIL();
 VM_START_FAIL();
 }
     if(!e->cfg.qemu[0]){feedback(e,"Select a QEMU executable first.");
-wipe_memory(password,sizeof(password));return -1;
+VM_START_FAIL();
 }
-    if(guest_helper_dir(helpers,sizeof(helpers))){feedback(e,"Megas guest helpers are missing from the package; the managed guest policy cannot be verified.");wipe_memory(password,sizeof(password));return -1;}
+    if(guest_helper_dir(helpers,sizeof(helpers))){feedback(e,"Megas guest helpers are missing from the package; the managed guest policy cannot be verified.");VM_START_FAIL();}
     snprintf(qmp,sizeof(qmp),"tcp:127.0.0.1:%u,server=on,wait=off",e->cfg.qmp_port);
 snprintf(vnc,sizeof(vnc),"127.0.0.1:%u",e->cfg.vnc_port-5900);
     snprintf(qga,sizeof(qga),"socket,id=megas-qga,host=127.0.0.1,port=%u,server=on,wait=off",e->cfg.qga_port);
@@ -2273,20 +2511,6 @@ argv[n++]=data_dir;
     }
     argv[n]=NULL;
 spawn_vm:
-    snprintf(e->vm_disk, sizeof(e->vm_disk), "%s", e->cfg.disk);
-    e->vm_ram_mb = e->cfg.ram_mb;
-    snprintf(e->vm_bus, sizeof(e->vm_bus), "%s", e->cfg.disk_bus);
-    snprintf(e->vm_video, sizeof(e->vm_video), "%s", e->cfg.video);
-    e->vm_profile_known = e->vm_ram_mb > 0;
-    {
-        char meta[2048];
-        Buffer mb;
-        binit(&mb, meta, sizeof(meta));
-        bput(&mb, "{\"disk\":"); bstr(&mb, e->vm_disk);
-        bfmt(&mb, ",\"ram_mb\":%u,\"bus\":", e->vm_ram_mb); bstr(&mb, e->vm_bus);
-        bput(&mb, ",\"video\":"); bstr(&mb, e->vm_video); bput(&mb, "}");
-        if (!mb.error) journal(e, "vm_profile", meta);
-    }
     e->disk_base=0;
     e->disk_base_known=0;
     e->snapshot_count=0;
@@ -2305,6 +2529,23 @@ if(journal(e,"process_spawn",command))VM_START_FAIL();
     if(mgp_spawn(&e->process,argv,e->qemu_log,error,sizeof(error))){feedback(e,"%s",error);
 VM_START_FAIL();
 }
+    /* The command line that actually started is the VM's identity from here
+     * on: the reported VM state, its recorded profile and its registry entry
+     * all follow the spawn that succeeded, never a request that was refused. */
+    snprintf(e->vm_disk, sizeof(e->vm_disk), "%s", e->cfg.disk);
+    e->vm_ram_mb = e->cfg.ram_mb;
+    snprintf(e->vm_bus, sizeof(e->vm_bus), "%s", e->cfg.disk_bus);
+    snprintf(e->vm_video, sizeof(e->vm_video), "%s", e->cfg.video);
+    e->vm_profile_known = e->vm_ram_mb > 0;
+    {
+        char meta[2048];
+        Buffer mb;
+        binit(&mb, meta, sizeof(meta));
+        bput(&mb, "{\"disk\":"); bstr(&mb, e->vm_disk);
+        bfmt(&mb, ",\"ram_mb\":%u,\"bus\":", e->vm_ram_mb); bstr(&mb, e->vm_bus);
+        bput(&mb, ",\"video\":"); bstr(&mb, e->vm_video); bput(&mb, "}");
+        if (!mb.error) journal(e, "vm_profile", meta);
+    }
     if (e->cfg.disk[0] && e->cfg.ram_mb) {
         VmProfile stored;
         memset(&stored, 0, sizeof(stored));
@@ -2317,10 +2558,27 @@ VM_START_FAIL();
         if (profile_save(e, &stored)) journal(e, "vm_profile_save_failed",
             "The effective VM configuration was not persisted; later starts must state RAM and bus explicitly.");
     }
+    {
+        VmRecord record;
+        int named;
+        memset(&record, 0, sizeof(record));
+        named = jget(j, 0, "name") >= 0 &&
+                !config_string(j, "name", record.name, sizeof(record.name)) && record.name[0];
+        if (!named) vm_record_name(record.name, sizeof(record.name), e->cfg.disk, e->cfg.iso);
+        if (!forwards[0]) config_string(j, "forwards", forwards, sizeof(forwards));
+        snprintf(record.disk, sizeof(record.disk), "%s", e->cfg.disk);
+        snprintf(record.bus, sizeof(record.bus), "%s", e->cfg.disk_bus);
+        snprintf(record.video, sizeof(record.video), "%s", e->cfg.video);
+        snprintf(record.iso, sizeof(record.iso), "%s", e->cfg.iso);
+        snprintf(record.forwards, sizeof(record.forwards), "%s", forwards);
+        record.ram_mb = e->cfg.ram_mb;
+        record.last_boot = (uint64_t)time(NULL);
+        registry_upsert(e, &record, named);
+    }
     e->status.owned_pid=mgp_pid(&e->process);
 strcpy(e->status.phase,"starting");
 
-    if(connect_qmp(e))VM_START_FAIL();
+    if(connect_qmp(e))VM_START_ABORT();
 
     if(!qmp_exec(e,"query-commands",NULL,500)){e->snapshot_supported=e->snapshot_supported&&has_command(e,"snapshot-save")&&has_command(e,"snapshot-load");
 }
@@ -2354,6 +2612,7 @@ feedback(e,"VM started. Live display is connected. %s",checkpoint_status);
     guest_auto_schedule(e, username, login_enabled, password);
     wipe_memory(password,sizeof(password));
 #undef VM_START_FAIL
+#undef VM_START_ABORT
 return 0;
 
 }
@@ -2524,13 +2783,18 @@ bstr(&b,e->status.phase);
     bstr(&b,e->guest_progress);
     /* close guest_job and state so vm stays a sibling of state */
     bput(&b,"}},\"vm\":{\"disk\":");
-    bstr(&b,e->vm_disk);
-    bfmt(&b,",\"memory_mb\":%u,\"bus\":",e->vm_ram_mb);
-    bstr(&b,e->vm_bus);
-    bput(&b,",\"video\":");bstr(&b,e->vm_video);
+    bstr(&b,e->cfg.disk);
+    bfmt(&b,",\"memory_mb\":%u,\"bus\":",e->cfg.ram_mb);
+    bstr(&b,e->cfg.disk_bus);
+    /* The same values under the configuration field names, so the agent and
+     * the desktop form read the same VM with the same names. */
+    bfmt(&b,",\"ram_mb\":%u,\"disk_bus\":",e->cfg.ram_mb);
+    bstr(&b,e->cfg.disk_bus);
+    bput(&b,",\"iso\":");bstr(&b,e->cfg.iso);
+    bput(&b,",\"video\":");bstr(&b,e->cfg.video);
     bfmt(&b,",\"profile_known\":%s,\"image_exists\":%s},\"ocr\":{\"status\":",
         e->vm_profile_known?"true":"false",
-        (e->vm_disk[0]&&mgp_file_size(e->vm_disk))?"true":"false");
+        (e->cfg.disk[0]&&mgp_file_size(e->cfg.disk))?"true":"false");
     bstr(&b,ocr_status_name(ocr_status));
     bfmt(&b,",\"generation\":%llu,\"pid\":%llu,\"peak_memory_bytes\":%llu,\"text\":",
          (unsigned long long)e->ocr_generation,(unsigned long long)e->ocr_pid,
@@ -3011,7 +3275,7 @@ int mg_engine_submit(MgEngine *e,const char *request,char *out,size_t cap) {
     Json *j;
 char *request_copy=NULL;
 size_t request_length=0;
-char requested[64]="invalid",action[64]="invalid",name[64],error[512];
+char requested[64]="invalid",action[64]="invalid",name[64],error[512],refusal[512];
 
     uint64_t begun=mgp_now();
 int ok=-1,mutating=0,capture=0;
@@ -3065,16 +3329,48 @@ goto done;
 goto done;
 }
     if(!strcmp(action,"preflight")){
-        char disk[1024]="";
+        char disk[1024]="",wanted[64]="";
         VmProfile p;
-        int known, running;
+        int known, running, named=0;
         uint64_t size;
         if(config_string(j,"disk",disk,sizeof(disk))){feedback(e,"Disk path is too long.");ok=-1;goto done;}
+        if(config_string(j,"name",wanted,sizeof(wanted))){feedback(e,"VM name is too long.");ok=-1;goto done;}
+        /* A name the owner uses for a VM resolves to one record, so asking
+         * for "4GB Windows" never means asking about a second copy. */
+        if(!disk[0]&&wanted[0]){
+            VmRecord records[VM_REGISTRY_CAP];
+            size_t count=registry_load(records,VM_REGISTRY_CAP),i;
+            for(i=0;i<count;i++)if(!strcmp(records[i].name,wanted)){
+                snprintf(disk,sizeof(disk),"%s",records[i].disk);
+                known=profile_load(e,disk,&p)==0;
+                /* The registry records what this VM was last started with, so
+                 * a named VM resolves even when its profile store is gone. */
+                if(!known&&records[i].ram_mb){
+                    memset(&p,0,sizeof(p));
+                    snprintf(p.disk,sizeof(p.disk),"%s",records[i].disk);
+                    p.ram_mb=records[i].ram_mb;
+                    snprintf(p.bus,sizeof(p.bus),"%s",records[i].bus);
+                    snprintf(p.video,sizeof(p.video),"%s",records[i].video);
+                    known=1;
+                    journal(e,"preflight_registry",records[i].name);
+                }
+                named=1;
+                break;
+            }
+            if(!named){feedback(e,"No VM named '%s' is registered. Use its disk path, or start it once to register the name.",wanted);ok=-1;goto done;}
+            snprintf(e->cfg.disk,sizeof(e->cfg.disk),"%s",disk);
+        }
         if(!disk[0])snprintf(disk,sizeof(disk),"%s",e->cfg.disk);
-        known=profile_load(e,disk,&p)==0;
+        if(!named)known=profile_load(e,disk,&p)==0;
         size=mgp_file_size(disk);
         running=e->status.owned_pid&&mgp_alive(&e->process);
-        journal(e,"preflight",disk);
+        {char audited[1200];Buffer ab;
+        binit(&ab,audited,sizeof(audited));
+        bput(&ab,"{\"name\":");bstr(&ab,wanted);
+        bput(&ab,",\"disk\":");bstr(&ab,disk);
+        bfmt(&ab,",\"profile_known\":%s}",known?"true":"false");
+        journal(e,"preflight",ab.error?disk:audited);
+        }
         if(known)feedback(e,"Recorded profile for %s: ram_mb=%u, bus=%s, video=%s. Start reuses these exact values; change RAM or bus only when the user asks or the task needs more memory.%s",
             disk,p.ram_mb,p.bus,p.video,size?"":" The disk image itself was not found on this computer.");
         else if(disk[0]&&size)feedback(e,"No recorded profile for %s, but its disk image exists: this VM's memory and disk bus are unknown and start will refuse. Ask the user for ram_mb (the VM's existing memory) and bus (ide, virtio, scsi or nvme), then start with those values. No default is applied.",disk);
@@ -3087,6 +3383,19 @@ goto done;
             snprintf(e->vm_bus,sizeof(e->vm_bus),"%s",known?p.bus:"");
             snprintf(e->vm_video,sizeof(e->vm_video),"%s",known?p.video:"");
             e->vm_profile_known=known;
+            /* The controller's own configuration follows the VM it now
+             * describes, so the reported state and the configuration the GUI
+             * reads can never point at two different VMs. */
+            snprintf(e->cfg.disk,sizeof(e->cfg.disk),"%s",disk);
+            if(known){
+                e->cfg.ram_mb=p.ram_mb;
+                snprintf(e->cfg.disk_bus,sizeof(e->cfg.disk_bus),"%s",p.bus);
+                snprintf(e->cfg.video,sizeof(e->cfg.video),"%s",p.video);
+            } else if(!running){
+                e->cfg.ram_mb=0;
+                e->cfg.disk_bus[0]=0;
+                e->cfg.video[0]=0;
+            }
         }
         ok=known?0:-1;
         goto done;
@@ -3155,7 +3464,9 @@ goto done;
     }
     if(!strcmp(action,"ocr")){ok=ocr_start(e,j);goto done;}
     if(!strcmp(action,"pause")||!strcmp(action,"resume")||!strcmp(action,"reset")||!strcmp(action,"key")||!strcmp(action,"type")||!strcmp(action,"click")||!strcmp(action,"pointer")||!strcmp(action,"resize")){
-        if(!e->status.connected){feedback(e,"Start the VM before sending this action.");
+        if(!e->status.connected){
+            if(!strcmp(action,"resize"))feedback(e,"VM stopped: the display of a stopped VM cannot be resized. Start the VM before changing the screen size.");
+            else feedback(e,"Start the VM before sending this action.");
 goto done;
 }
         if(!e->status.running && (!strcmp(action,"type") || !strcmp(action,"click") || !strcmp(action,"pointer") || !strcmp(action,"key")) && !jeq(j,jget(j,0,"down"),"false")) {feedback(e,"The VM is paused; resume it before input so keys are not discarded.");goto done;}
@@ -3196,6 +3507,14 @@ if(!ok)ok=mg_rfb_pointer(e->display,x,y,0);
             unsigned w=number_or(j,"width",0),height=number_or(j,"height",0);
 uint64_t deadline;
 
+            /* A stopped guest has no framebuffer to resize: say exactly that
+             * instead of asking a dead display and reporting a bare ok=0. */
+            if(!e->status.running){
+                if(!strcmp(e->status.phase,"paused"))feedback(e,"VM is paused; resume it before changing the screen size.");
+                else feedback(e,"VM stopped; start it before changing the screen size. The display of a stopped VM cannot be resized.");
+                ok=-1;
+                goto done;
+            }
             if(w<320||height<200||w>4096||height>4096||(uint64_t)w*height>9437184){feedback(e,"Choose screen size at least 320x200 and at most 9 million pixels.");
 goto done;
 }
@@ -3233,12 +3552,26 @@ goto done;
     feedback(e,"Unknown action '%s'. Supported aliases are normalized; an unknown command cannot be guessed safely. Use the copyable repair prompt.",requested);
 
 done:
+    /* The reason is read before the display tick, which may replace the
+     * feedback with a display notice of its own. */
+    snprintf(refusal,sizeof(refusal),"%s",e->status.feedback[0]?e->status.feedback:"The action was refused without a reported reason.");
     display_tick(e);
 if(e->status.connected&&!e->late_id&&!e->transient_response)refresh_state(e);
 
     repair(e,action);
 
     if(ok)e->status.failed++;
+
+    /* Every refused action records why it was refused, so a journal reader
+     * never has to infer the reason from a bare ok=0. */
+    if(ok){char failure[1024];Buffer fb;
+binit(&fb,failure,sizeof(failure));
+bput(&fb,"{\"action\":");bstr(&fb,action);
+bput(&fb,",\"reason\":");
+bstr(&fb,refusal);
+bfmt(&fb,",\"running\":%s,\"connected\":%s}",e->status.running?"true":"false",e->status.connected?"true":"false");
+if(!fb.error)journal(e,"action_failed",failure);
+}
 
     if(h){char result[512];
 h->ok=!ok;

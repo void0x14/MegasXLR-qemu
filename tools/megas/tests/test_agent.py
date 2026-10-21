@@ -20,7 +20,13 @@ def main():
     binary = str(Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory(prefix='megas-agent-test-') as runtime:
         control = port()
+        # The named VM registry lives under HOME, so the test never writes
+        # into the home directory of the person running it.
+        home = Path(runtime) / 'home'
+        home.mkdir(exist_ok=True)
         env = dict(os.environ)
+        env['HOME'] = str(home)
+        env['XDG_CONFIG_HOME'] = str(home / '.config')
         common = [binary, '--runtime', runtime, '--port', str(control)]
         manager = subprocess.Popen(
             common + ['serve'], env=env,

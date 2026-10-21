@@ -1,0 +1,39 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Pure state rules for the native GUI. No I/O, no engine handle: every rule
+ * is a decision that the view layer applies, kept separate so it can be
+ * tested without a display, an engine or a running VM. */
+#ifndef MEGAS_UISYNC_H
+#define MEGAS_UISYNC_H
+
+/* The form fields the controller reconciles with the engine. */
+typedef struct {
+    char disk[1024];
+    char iso[1024];
+    char bus[16];
+    int ram;
+    int ram_dirty;
+    int bus_dirty;
+    int disk_dirty;
+} MgUiSyncState;
+
+/* What the engine reports about the VM it currently owns. */
+typedef struct {
+    char disk[1024];
+    char iso[1024];
+    char bus[16];
+    unsigned ram_mb;
+} MgUiSyncSource;
+
+/* Reconcile the form with the engine's own record of the VM. A running VM's
+ * identity belongs to the VM: the form adopts it instead of inventing one.
+ * A field the user typed keeps its value; the engine never overwrites a
+ * deliberate choice. Returns 1 when any field changed. */
+int mg_ui_sync(MgUiSyncState *state, const MgUiSyncSource *source);
+
+/* A VM without a disk and without an installer image has nothing to boot. */
+int mg_ui_start_allowed(const char *disk, const char *iso);
+
+/* The guest display can only be resized while the guest is live. */
+int mg_ui_resize_enabled(int connected, int running);
+
+#endif

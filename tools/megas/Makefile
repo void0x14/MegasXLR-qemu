@@ -12,8 +12,8 @@ TESSERACT_DATA ?=
 CPPFLAGS += -Isrc -Ivendor
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -Wall -Wextra
-COMMON = src/main.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c
-HEADERS = src/megas.h src/rfb.h src/platform.h src/guest.h src/seed.h
+COMMON = src/main.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c src/uisync.c
+HEADERS = src/megas.h src/rfb.h src/platform.h src/guest.h src/seed.h src/uisync.h
 WINDOWS := $(if $(filter Windows_NT,$(OS)),1,$(if $(findstring mingw,$(CC)),1,0))
 ifeq ($(WINDOWS),1)
 EXE = .exe
@@ -27,7 +27,7 @@ GUI_LIBS = -lX11 -lm
 CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 endif
 
-.PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle bundle
+.PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle test-evidence bundle
 all: $(BUILD)/megas$(EXE)
 headless: $(BUILD)/megas-headless$(EXE)
 $(BUILD):
@@ -49,22 +49,28 @@ $(BUILD)/test-seed$(EXE): tests/test_seed.c src/seed.c src/platform.c $(wildcard
 test-seed: $(BUILD)/test-seed$(EXE)
 	"./$(BUILD)/test-seed$(EXE)"
 ifeq ($(WINDOWS),0)
-$(BUILD)/test-engine: tests/test_engine.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c $(wildcard $(HEADERS)) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_engine.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c -lm $(LDLIBS)
+$(BUILD)/test-uisync$(EXE): tests/test_uisync.c src/uisync.c $(wildcard src/uisync.h) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_uisync.c src/uisync.c $(CORE_LIBS) $(LDLIBS)
+test-uisync: $(BUILD)/test-uisync$(EXE)
+	"./$(BUILD)/test-uisync$(EXE)"
+$(BUILD)/test-engine: tests/test_engine.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c src/uisync.c $(wildcard $(HEADERS)) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_engine.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c src/uisync.c -lm $(LDLIBS)
 test-engine: $(BUILD)/test-engine
 	"./$(BUILD)/test-engine"
 $(BUILD)/test-guest: tests/test_guest.c src/guest.c src/platform.c $(wildcard src/guest.h src/platform.h) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -pthread -o "$@" tests/test_guest.c src/guest.c src/platform.c $(LDLIBS)
 test-guest: $(BUILD)/test-guest
 	"./$(BUILD)/test-guest"
-test: test-rfb test-platform test-seed test-engine test-guest test-bundle test-live test-agent
+test: test-rfb test-platform test-seed test-uisync test-engine test-guest test-bundle test-evidence test-live test-agent
 else
 test-engine test-guest:
 	@echo "SKIP: $@ uses POSIX-only test fixtures and is not run on Windows."
-test: test-rfb test-platform test-seed test-bundle test-live test-agent
+test: test-rfb test-platform test-seed test-uisync test-bundle test-evidence test-live test-agent
 endif
 test-bundle:
 	$(PYTHON) tests/test_bundle.py
+test-evidence: headless
+	sh tests/evidence_faults.sh "$(BUILD)/megas-headless$(EXE)"
 test-smoke test-live: headless
 	$(PYTHON) tests/test_live.py "$(BUILD)/megas-headless$(EXE)" --report "$(BUILD)/live-report.json"
 test-agent: headless

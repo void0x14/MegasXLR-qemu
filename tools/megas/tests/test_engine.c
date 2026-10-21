@@ -333,6 +333,9 @@ static void test_vm_profile_reuse(void) {
 
     snprintf(request,sizeof(request),"{\"action\":\"preflight\",\"disk\":\"%s/disk.qcow2\"}",runtime);
     mg_config_defaults(&cfg);snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    /* The test owns its ports: a controller already running on the default
+     * port of the machine must not decide whether this test can start. */
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;test_port+=10;
     engine=mg_engine_new(&cfg);assert(engine);
     assert(!mg_engine_submit(engine,request,response,sizeof(response)));
     assert(strstr(response,"4096"));assert(strstr(response,"ide"));
@@ -526,14 +529,137 @@ static void test_checkpoint_catalog_over_limit_keeps_vm(void) {
     puts("engine: an over-limit QMP catalog fails closed for checkpointing without stopping the VM");
 }
 
+static void test_start_refuses_empty_disk(void) {
+    MgConfig cfg;MgEngine *engine;char runtime[]="/tmp/megas-empty-XXXXXX",response[65536],journal[65536],path[1200];
+    assert(mkdtemp(runtime));
+    mg_config_defaults(&cfg);
+    snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
+    cfg.disk[0]=0;
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.width=800;cfg.height=600;test_port+=10;
+    engine=mg_engine_new(&cfg);assert(engine);
+    /* A VM with no disk and no installation media has nothing to boot. */
+    assert(mg_engine_submit(engine,"{\"action\":\"start\",\"ram_mb\":2048,\"bus\":\"ide\"}",response,sizeof(response)));
+    assert(strstr(response,"\"ok\":false"));
+    assert(strstr(response,"disk"));
+    assert(strstr(response,"Refused to start"));
+    snprintf(path,sizeof(path),"%s/actions.jsonl",runtime);
+    read_text_file(path,journal,sizeof(journal));
+    assert(strstr(journal,"\"type\":\"start_refused\""));
+    assert(within(journal,"\"type\":\"start_refused\"","requested=start normalized=start ok=0",8192));
+    mg_engine_free(engine);
+    puts("engine: a start without a disk and without media is refused and the refusal is journaled");
+}
+static void test_resize_refused_while_stopped(void) {
+    MgConfig cfg;MgEngine *engine;char runtime[]="/tmp/megas-resize-XXXXXX",response[65536],journal[65536],path[1200],disk[1000];
+    FILE *file;
+    assert(mkdtemp(runtime));
+    mg_config_defaults(&cfg);
+    snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
+    snprintf(disk,sizeof(disk),"%s/disk.qcow2",runtime);
+    snprintf(cfg.disk,sizeof(cfg.disk),"%s",disk);
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.width=800;cfg.height=600;test_port+=10;
+    file=fopen(disk,"wb");assert(file);fputs("fixture",file);fclose(file);
+    engine=mg_engine_new(&cfg);assert(engine);
+    assert(!mg_engine_submit(engine,"{\"action\":\"start\",\"ram_mb\":2048,\"bus\":\"ide\"}",response,sizeof(response)));
+    assert(!mg_engine_submit(engine,"{\"action\":\"stop\"}",response,sizeof(response)));
+    /* The display of a stopped VM cannot be resized, and the refusal says so. */
+    assert(mg_engine_submit(engine,"{\"action\":\"resize\",\"width\":1280,\"height\":720}",response,sizeof(response)));
+    assert(strstr(response,"\"ok\":false"));
+    assert(strstr(response,"stopped")||strstr(response,"Start the VM"));
+    snprintf(path,sizeof(path),"%s/actions.jsonl",runtime);
+    read_text_file(path,journal,sizeof(journal));
+    assert(strstr(journal,"\"type\":\"action_failed\""));
+    assert(strstr(journal,"\\\"action\\\":\\\"resize\\\""));
+    assert(strstr(journal,"\\\"reason\\\":\\\""));
+    assert(!strstr(journal,"\\\"reason\\\":\\\"\\\""));
+    assert(strstr(journal,"\\\"running\\\":"));
+    assert(strstr(journal,"\\\"connected\\\":"));
+    mg_engine_free(engine);
+    puts("engine: a resize on a stopped VM is refused with a journaled reason");
+}
+static void test_config_follows_started_vm(void) {
+    MgConfig cfg;MgEngine *engine;char runtime[]="/tmp/megas-config-XXXXXX",response[65536],disk[1000];
+    const MgConfig *config;FILE *file;
+    assert(mkdtemp(runtime));
+    mg_config_defaults(&cfg);
+    snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
+    snprintf(disk,sizeof(disk),"%s/winlpe.qcow2",runtime);
+    snprintf(cfg.disk,sizeof(cfg.disk),"%s",disk);
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.width=800;cfg.height=600;test_port+=10;
+    file=fopen(disk,"wb");assert(file);fputs("fixture",file);fclose(file);
+    engine=mg_engine_new(&cfg);assert(engine);
+    assert(!mg_engine_submit(engine,"{\"action\":\"start\",\"ram_mb\":4096,\"bus\":\"ide\"}",response,sizeof(response)));
+    /* The configuration is the VM that actually started. */
+    config=mg_engine_config(engine);
+    assert(!strcmp(config->disk,disk));
+    assert(config->ram_mb==4096);
+    assert(!strcmp(config->disk_bus,"ide"));
+    /* The reported state uses the same names and the same values. */
+    assert(strstr(response,"\"ram_mb\":4096"));
+    assert(strstr(response,"\"disk_bus\":\"ide\""));
+    assert(strstr(response,"\"memory_mb\":4096"));
+    assert(strstr(response,"\"bus\":\"ide\""));
+    assert(strstr(response,disk));
+    assert(!mg_engine_submit(engine,"{\"action\":\"stop\"}",response,sizeof(response)));
+    mg_engine_free(engine);
+    puts("engine: the configuration and the reported state describe the VM that started");
+}
+static void test_named_vm_registry(void) {
+    MgConfig cfg;MgEngine *engine;char runtime[]="/tmp/megas-registry-XXXXXX",response[65536],disk[1000],registry[1200];
+    const MgConfig *config;FILE *file;size_t n;char text[65536];
+    assert(mkdtemp(runtime));
+    mg_config_defaults(&cfg);
+    snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
+    snprintf(disk,sizeof(disk),"%s/winlpe.qcow2",runtime);
+    snprintf(cfg.disk,sizeof(cfg.disk),"%s",disk);
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.width=800;cfg.height=600;test_port+=10;
+    file=fopen(disk,"wb");assert(file);fputs("fixture",file);fclose(file);
+    engine=mg_engine_new(&cfg);assert(engine);
+    assert(!mg_engine_submit(engine,"{\"action\":\"start\",\"ram_mb\":4096,\"bus\":\"ide\",\"name\":\"4GB Windows\"}",response,sizeof(response)));
+    config=mg_engine_config(engine);
+    assert(!strcmp(config->disk,disk));
+    assert(config->ram_mb==4096);
+    assert(!strcmp(config->disk_bus,"ide"));
+    snprintf(registry,sizeof(registry),"%s/.config/megas/vms.json",getenv("HOME")?getenv("HOME"):"");
+    file=fopen(registry,"rb");assert(file);n=fread(text,1,sizeof(text)-1,file);text[n]=0;fclose(file);
+    assert(strstr(text,"\"vms\""));
+    assert(strstr(text,"\"name\":\"4GB Windows\""));
+    assert(strstr(text,"\"ram_mb\":4096"));
+    assert(strstr(text,"\"bus\":\"ide\""));
+    assert(strstr(text,"\"iso\""));
+    assert(strstr(text,"\"forwards\""));
+    assert(strstr(text,"\"last_boot\""));
+    assert(occurrences(text,disk)==1);
+    assert(!mg_engine_submit(engine,"{\"action\":\"stop\"}",response,sizeof(response)));
+    /* A named VM resolves to the one record that describes it. */
+    assert(!mg_engine_submit(engine,"{\"action\":\"preflight\",\"name\":\"4GB Windows\"}",response,sizeof(response)));
+    assert(strstr(response,"4096"));
+    assert(strstr(response,"ide"));
+    assert(strstr(response,disk));
+    /* Restarting the same VM does not open a second record. */
+    assert(!mg_engine_submit(engine,"{\"action\":\"start\",\"ram_mb\":4096,\"bus\":\"ide\",\"name\":\"4GB Windows\"}",response,sizeof(response)));
+    assert(!mg_engine_submit(engine,"{\"action\":\"stop\"}",response,sizeof(response)));
+    file=fopen(registry,"rb");assert(file);n=fread(text,1,sizeof(text)-1,file);text[n]=0;fclose(file);
+    assert(occurrences(text,disk)==1);
+    mg_engine_free(engine);
+    puts("engine: a named VM is registered once, resolves by name, and the configuration follows the started VM");
+}
 int main(int argc,char **argv) {
     MgConfig cfg;MgEngine *e;char runtime[]="/tmp/megas-engine-XXXXXX",response[65536],request[2048],self[1024],cwd[1024];FILE *file;uint64_t begun;
     if(argc>1)return fake_qemu(argc,argv);
     assert(mkdtemp(runtime));assert(getcwd(cwd,sizeof(cwd)));
+    test_port=52701u+((unsigned)getpid()%400u)*20u;
+    /* The named VM registry lives under HOME, so the tests never write into
+     * the home directory of the person running them. */
+    {char home[1200];snprintf(home,sizeof(home),"%s/home",runtime);assert(!mkdir(home,0700));assert(!setenv("HOME",home,1));}
     if(argv[0][0]=='/')snprintf(self,sizeof(self),"%s",argv[0]);else snprintf(self,sizeof(self),"%.700s/%.300s",cwd,argv[0]);
     snprintf(test_program,sizeof(test_program),"%s",self);
     mg_config_defaults(&cfg);snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",self);
-    cfg.control_port=52601;cfg.qmp_port=52602;cfg.vnc_port=52603;cfg.ram_mb=16;snprintf(cfg.disk_bus,sizeof(cfg.disk_bus),"virtio");cfg.width=800;cfg.height=600;
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;test_port+=10;cfg.ram_mb=16;snprintf(cfg.disk_bus,sizeof(cfg.disk_bus),"virtio");cfg.width=800;cfg.height=600;
     snprintf(cfg.disk,sizeof(cfg.disk),"%s/disk.qcow2",runtime);file=fopen(cfg.disk,"wb");assert(file);fputs("fixture",file);fclose(file);
     e=mg_engine_new(&cfg);assert(e);
     assert(!mg_engine_submit(e,"{\"action\":\"start\"}",response,sizeof(response)));assert(strstr(response,"\"connected\":true"));assert(strstr(response,"\"image_path\":\"\""));
@@ -563,5 +689,9 @@ int main(int argc,char **argv) {
     test_checkpoint_catalog_foreign_never_auto_gc();test_checkpoint_catalog_full_foreign_fails_closed();
     test_checkpoint_catalog_unavailable_keeps_vm();test_checkpoint_catalog_over_limit_keeps_vm();
     test_vm_profile_reuse();
+    test_start_refuses_empty_disk();
+    test_resize_refused_while_stopped();
+    test_config_follows_started_vm();
+    test_named_vm_registry();
     return 0;
 }

@@ -4,6 +4,8 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "megas.h"
+#include "platform.h"
+#include "uisync.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,7 +47,7 @@ typedef struct {
     struct nk_rect viewport, picture;
     int width, height, alive, focused, tab, settings_tab, advanced_settings, res_selected;
     int ram, vm_w, vm_h, passwordless, disk_gb, create_dialog, creating_disk, bus_selected;
-    int ram_dirty, bus_dirty, profile_missing;
+    int ram_dirty, bus_dirty, profile_missing, disk_dirty;
     char preflight_disk[1024];
     int password_field_visible;
     float row;
@@ -226,6 +228,64 @@ static int gui_field_text(const char *text, const char *key, char *out, size_t c
     return 1;
 }
 
+/* The engine owns the running VM's identity. After every action the form
+ * reads it back, so a VM the agent started is visible here instead of
+ * leaving the form empty and sending a second, empty start. */
+static void gui_edit_load(struct nk_text_edit *edit, const char *value);
+static void gui_state_sync(MgGui *ui)
+{
+    const MgConfig *c = mg_engine_config(ui->engine);
+    MgUiSyncState state;
+    MgUiSyncSource source;
+    int i;
+    memset(&state, 0, sizeof(state));
+    memset(&source, 0, sizeof(source));
+    snprintf(state.disk, sizeof(state.disk), "%s", ui->disk);
+    snprintf(state.iso, sizeof(state.iso), "%s", ui->iso);
+    snprintf(state.bus, sizeof(state.bus), "%s", ui->bus);
+    state.ram = ui->ram;
+    state.ram_dirty = ui->ram_dirty;
+    state.bus_dirty = ui->bus_dirty;
+    state.disk_dirty = ui->disk_dirty;
+    snprintf(source.disk, sizeof(source.disk), "%s", c->disk);
+    snprintf(source.iso, sizeof(source.iso), "%s", c->iso);
+    snprintf(source.bus, sizeof(source.bus), "%s", c->disk_bus);
+    source.ram_mb = c->ram_mb;
+    if (!mg_ui_sync(&state, &source)) return;
+    if (strcmp(ui->disk, state.disk)) {
+        snprintf(ui->disk, sizeof(ui->disk), "%s", state.disk);
+        /* The editor holds its own copy of the text. Leaving it behind would
+         * make the next frame write the old text back and erase the disk the
+         * engine actually runs. */
+        gui_edit_load(&ui->editors[0], ui->disk);
+        snprintf(ui->editor_shadow[0], sizeof(ui->editor_shadow[0]), "%s", ui->disk);
+    }
+    if (strcmp(ui->iso, state.iso)) snprintf(ui->iso, sizeof(ui->iso), "%s", state.iso);
+    if (strcmp(ui->bus, state.bus)) {
+        snprintf(ui->bus, sizeof(ui->bus), "%s", state.bus);
+        for (i = 0; i < 4; ++i) if (!strcmp(gui_bus_names[i], ui->bus)) ui->bus_selected = i;
+    }
+    if (ui->ram != state.ram) ui->ram = state.ram;
+    /* The form now names the disk the engine runs, so the preflight answer
+     * for the previous disk is stale and must be asked again. */
+    if (strcmp(ui->disk, ui->preflight_disk)) ui->preflight_disk[0] = 0;
+}
+
+/* Permanent VM data lives outside the runtime directory so it survives a
+ * reboot. A disk under a temporary directory is lost with it. */
+static int gui_vm_data_dir(char *out, size_t cap)
+{
+    char home[1024];
+#ifdef _WIN32
+    if (mgp_env("LOCALAPPDATA", home, sizeof(home)) || !home[0]) return -1;
+    if (snprintf(out, cap, "%.900s\\Megas\\vms", home) >= (int)cap) return -1;
+#else
+    if (mgp_env("HOME", home, sizeof(home)) || !home[0]) return -1;
+    if (snprintf(out, cap, "%.900s/.local/share/megas/vms", home) >= (int)cap) return -1;
+#endif
+    return 0;
+}
+
 /* An existing VM keeps its own memory and disk bus. Before a start the
  * selected disk is asked of the controller, so the form shows the recorded
  * values instead of silently substituting its own defaults. */
@@ -262,6 +322,11 @@ static void gui_start(MgGui *ui)
     char qemu[6144], disk[6144], iso[6144], username[768], password[1536], request[22000];
     const MgStatus *status = mg_engine_status(ui->engine);
     gui_profile_sync(ui);
+    if (!mg_ui_start_allowed(ui->disk, ui->iso)) {
+        gui_note(ui, tr("Bu VM'nin açılacak bir diski yok. Yeni bir disk oluşturun ya da bir kurulum/güvenlik diski seçin.",
+                        "This VM has no disk to boot from. Create a new disk or choose an installation image."));
+        return;
+    }
     if (ui->profile_missing && !ui->ram_dirty && !ui->bus_dirty) {
         gui_note(ui, tr("Bu diskin kayıtlı belleği ve disk yolu yok; mevcut bir disk sessizce yeniden bağlanmaz. Ayarlar'dan VM belleğini ve disk yolunu (bus) VM'in orijinal değerleriyle seçin.",
                         "This disk has no recorded memory or disk bus, and an existing disk is never reattached silently. In Settings set VM memory and disk bus to the VM's original values, then start again."));
@@ -557,6 +622,20 @@ static void gui_browse(MgGui *ui, int target)
 }
 
 /* Persistent editors also give X11's asynchronous clipboard a valid target. */
+/* Put a value into a Nuklear editor without going through the keyboard. */
+static void gui_edit_load(struct nk_text_edit *edit, const char *value)
+{
+    size_t length = strlen(value);
+    nk_str_clear(&edit->string);
+    /* nk_str_append_str_utf8 includes its terminating NUL in the byte
+     * buffer length. Edit rendering consumes that length and can show the
+     * terminator as a stray glyph, so append the actual UTF-8 bytes. */
+    if (length <= INT32_MAX)
+        nk_str_append_text_char(&edit->string, value, (int)length);
+    edit->cursor = nk_utf_len(value, (int)length);
+    edit->select_start = edit->select_end = edit->cursor;
+}
+
 static void gui_edit(MgGui *ui, int slot, char *field, size_t capacity)
 {
     struct nk_text_edit *edit = &ui->editors[slot];
@@ -566,15 +645,7 @@ static void gui_edit(MgGui *ui, int slot, char *field, size_t capacity)
         ui->editor_ready |= 1u << slot;
     }
     if (strcmp(field, ui->editor_shadow[slot]) != 0) {
-        size_t length = strlen(field);
-        nk_str_clear(&edit->string);
-        /* nk_str_append_str_utf8 includes its terminating NUL in the byte
-         * buffer length. Edit rendering consumes that length and can show
-         * the terminator as a stray glyph, so append the actual UTF-8 bytes. */
-        if (length <= INT32_MAX)
-            nk_str_append_text_char(&edit->string, field, (int)length);
-        edit->cursor = nk_utf_len(field, (int)length);
-        edit->select_start = edit->select_end = edit->cursor;
+        gui_edit_load(edit, field);
     }
     nk_edit_buffer(ui->ctx, slot == 7 ? (NK_EDIT_SIMPLE|NK_EDIT_SELECTABLE) : NK_EDIT_FIELD,
                    edit, nk_filter_default);
@@ -584,6 +655,11 @@ static void gui_edit(MgGui *ui, int slot, char *field, size_t capacity)
     if (n >= (int)capacity) n = (int)capacity-1;
     if (n > 0) memcpy(field, nk_str_get_const(&edit->string), (size_t)n);
     field[n] = 0;
+    if (slot == 0 && strcmp(ui->editor_shadow[slot], field)) {
+        /* The operator named this disk themselves. The engine's own record
+         * never replaces that choice, so the form keeps what was asked for. */
+        ui->disk_dirty = 1;
+    }
     snprintf(ui->editor_shadow[slot], sizeof(ui->editor_shadow[slot]), "%s", field);
 }
 
@@ -794,12 +870,18 @@ static void gui_settings(MgGui *ui)
     struct nk_context *ctx = ui->ctx;
     char request[192];
     gui_field(ui, tr("Sanal disk", "VM disk"),
-        tr("VM'in dosyaları ve işletim sistemi. Geri dönüş için qcow2 biçimi kullanılır.",
-           "The VM's files and operating system. Use qcow2 format for checkpoints."), ui->disk, 1);
+        tr("VM'in dosyaları ve işletim sistemi. /tmp altındaki diskler geçici olarak kaybolur; kalıcı VM'ler ~/.local/share/megas/vms/ altında tutulmalıdır.",
+           "The VM's files and operating system. Disks under /tmp are lost on reboot; keep permanent VMs in ~/.local/share/megas/vms/."), ui->disk, 1);
     nk_layout_row_dynamic(ctx, ui->row, 1);
     if (nk_button_label(ctx, tr("Yeni disk oluştur…", "Create a new disk…"))) {
         const MgConfig *config = mg_engine_config(ui->engine);
-        snprintf(ui->new_disk, sizeof(ui->new_disk), "%.950s/vm-%llu.qcow2", config->runtime_dir, (unsigned long long)time(NULL));
+        char directory[1024];
+        /* A new disk belongs with the permanent VM data, not in a directory
+         * that a reboot erases. */
+        if (gui_vm_data_dir(directory, sizeof(directory)) || !directory[0])
+            snprintf(directory, sizeof(directory), "%.950s", config->runtime_dir);
+        (void)mgp_mkdir(directory);
+        snprintf(ui->new_disk, sizeof(ui->new_disk), "%.900s/vm-%llu.qcow2", directory, (unsigned long long)time(NULL));
         ui->create_dialog = 1;
         gui_release(ui);
     }
@@ -868,9 +950,25 @@ static void gui_settings(MgGui *ui)
         }
     }
     nk_layout_row_dynamic(ctx, ui->row, 1);
-    if (nk_button_label(ctx, tr("Ekran boyutunu uygula", "Apply screen size"))) {
-        snprintf(request, sizeof(request), "{\"action\":\"resize\",\"width\":%d,\"height\":%d,\"checkpoint\":false}", ui->vm_w, ui->vm_h);
-        gui_queue(ui, request);
+    {
+        /* The guest display only resizes while the guest is live, so the
+         * control is not offered for a stopped VM. */
+        const MgStatus *live = mg_engine_status(ui->engine);
+        int enabled = mg_ui_resize_enabled(live->connected, live->running);
+        if (!enabled) nk_widget_disable_begin(ctx);
+        if (nk_button_label(ctx, tr("Ekran boyutunu uygula", "Apply screen size"))) {
+            if (enabled) {
+                snprintf(request, sizeof(request), "{\"action\":\"resize\",\"width\":%d,\"height\":%d,\"checkpoint\":false}", ui->vm_w, ui->vm_h);
+                gui_queue(ui, request);
+            } else {
+                gui_note(ui, tr("VM durmuş; ekran boyutu değiştirilemez. Önce VM'i başlatın.",
+                                "The VM is stopped; the screen size cannot change. Start the VM first."));
+            }
+        }
+        if (!enabled) nk_widget_disable_end(ctx);
+        if (nk_widget_is_hovered(ctx)) nk_tooltip(ctx,
+            tr("Ekran boyutu yalnızca çalışan bir VM'de değiştirilebilir.",
+               "The screen size can only change while the VM is running."));
     }
     nk_layout_row_dynamic(ctx, ui->row*2, 1);
     nk_label_wrap(ctx, tr("Çalışırken ekran boyutu değişebilir; VM içindeki ekran sürücüsü bunu desteklemelidir.",
@@ -1275,6 +1373,7 @@ static void gui_execute_pending(MgGui *ui)
     gui_wipe(request,sizeof(request));
     status=mg_engine_status(ui->engine);
     gui_note(ui,status->feedback);
+    gui_state_sync(ui);
     if (refresh_history) gui_history(ui);
     if (ui->creating_disk) {
         if (!result) {
@@ -1589,6 +1688,9 @@ int mg_gui_run(MgEngine *engine)
     gui_palette(ui->ctx);
     while(ui->alive && !mg_interrupted()) {
         mg_engine_tick(engine);
+        /* A VM the agent started never passes through this window's own
+         * queue, so the engine's own record is read back every frame. */
+        gui_state_sync(ui);
         if (strcmp(ui->seen_feedback,mg_engine_status(engine)->feedback) != 0) {
             snprintf(ui->seen_feedback,sizeof(ui->seen_feedback),"%s",mg_engine_status(engine)->feedback);
             if (!ui->pending[0]) gui_note(ui,ui->seen_feedback);
