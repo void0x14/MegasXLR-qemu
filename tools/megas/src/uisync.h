@@ -30,6 +30,11 @@ typedef struct {
  * deliberate choice. Returns 1 when any field changed. */
 int mg_ui_sync(MgUiSyncState *state, const MgUiSyncSource *source);
 
+/* Whether the operator has changed a field themselves. The engine's own
+ * write is not a change of theirs, so the two are told apart here rather
+ * than by the caller: one rule, one place to keep correct. */
+int mg_ui_disk_touched(MgUiSyncState *state, const char *before, const char *after);
+
 /* A VM without a disk and without an installer image has nothing to boot. */
 int mg_ui_start_allowed(const char *disk, const char *iso);
 

@@ -259,10 +259,10 @@ static void gui_state_sync(MgGui *ui)
          * engine actually runs. */
         gui_edit_load(&ui->editors[0], ui->disk);
         snprintf(ui->editor_shadow[0], sizeof(ui->editor_shadow[0]), "%s", ui->disk);
-        /* This change came from the engine, not from the operator, so the
-         * field is not marked as their choice. */
-        ui->disk_dirty = 0;
     }
+    /* mg_ui_sync cleared the operator's mark because the engine filled this
+     * field itself; an operator's own path is never taken back. */
+    ui->disk_dirty = state.disk_dirty;
     if (strcmp(ui->iso, state.iso)) snprintf(ui->iso, sizeof(ui->iso), "%s", state.iso);
     if (strcmp(ui->bus, state.bus)) {
         snprintf(ui->bus, sizeof(ui->bus), "%s", state.bus);
@@ -654,8 +654,8 @@ static void gui_edit(MgGui *ui, int slot, char *field, size_t capacity)
                    edit, nk_filter_default);
     /* Nuklear stores code points in `string.len` and UTF-8 bytes in the
      * string buffer. The external field capacity and memcpy are byte based.
-     * An emptied field is written back as empty, so clearing the disk path
-     * really clears it instead of restoring the previous value. */
+     * `field[n] = 0` also covers the emptied case: clearing the disk path
+     * leaves it empty rather than restoring the previous value. */
     n = nk_str_len_char(&edit->string);
     if (n >= (int)capacity) n = (int)capacity-1;
     if (n > 0) memcpy(field, nk_str_get_const(&edit->string), (size_t)n);
@@ -663,7 +663,12 @@ static void gui_edit(MgGui *ui, int slot, char *field, size_t capacity)
     /* A path the operator typed is theirs. The engine's own record never
      * takes it back, so a cleared path stays cleared instead of filling
      * itself again and starting the previous VM. */
-    if (slot == 0 && strcmp(ui->editor_shadow[slot], field)) ui->disk_dirty = 1;
+    if (slot == 0) {
+        MgUiSyncState state;
+        memset(&state, 0, sizeof(state));
+        mg_ui_disk_touched(&state, ui->editor_shadow[slot], field);
+        if (state.disk_dirty) ui->disk_dirty = 1;
+    }
     snprintf(ui->editor_shadow[slot], sizeof(ui->editor_shadow[slot]), "%s", field);
 }
 

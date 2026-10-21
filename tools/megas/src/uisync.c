@@ -30,6 +30,10 @@ int mg_ui_sync(MgUiSyncState *state, const MgUiSyncSource *source)
         memcpy(state->disk, source->disk, n);
         state->disk[n] = 0;
         changed = 1;
+        /* The engine filled the field, which is not the operator choosing it.
+         * Clearing the mark here keeps that knowledge in one place, so the
+         * caller cannot take the engine's write for an operator's choice. */
+        state->disk_dirty = 0;
     }
     if (!state->iso[0] && source->iso[0]) {
         size_t n = strlen(source->iso);
@@ -54,6 +58,13 @@ int mg_ui_sync(MgUiSyncState *state, const MgUiSyncSource *source)
         changed = 1;
     }
     return changed;
+}
+
+int mg_ui_disk_touched(MgUiSyncState *state, const char *before, const char *after)
+{
+    if (!state || !before || !after || !strcmp(before, after)) return 0;
+    state->disk_dirty = 1;
+    return 1;
 }
 
 int mg_ui_start_allowed(const char *disk, const char *iso)

@@ -70,7 +70,8 @@ endif
 test-bundle:
 	$(PYTHON) tests/test_bundle.py
 test-evidence: headless
-	sh tests/evidence_faults.sh "$(BUILD)/megas-headless$(EXE)"test-smoke test-live: headless
+	sh tests/evidence_faults.sh "$(BUILD)/megas-headless$(EXE)"
+test-smoke test-live: headless
 	$(PYTHON) tests/test_live.py "$(BUILD)/megas-headless$(EXE)" --report "$(BUILD)/live-report.json"
 test-agent: headless
 	$(PYTHON) tests/test_agent.py "$(BUILD)/megas-headless$(EXE)"

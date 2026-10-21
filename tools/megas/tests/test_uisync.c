@@ -46,6 +46,48 @@ static void test_engine_disk_replaces_a_stale_form_disk(void)
     puts("uisync: the engine's disk replaces a stale form disk");
 }
 
+static void test_the_engine_clears_the_operator_mark(void)
+{
+    MgUiSyncState state;
+    MgUiSyncSource source;
+    /* A field the operator had touched, which the engine then refilled with
+     * its own record: that write is the engine's, not the operator's, so the
+     * mark is cleared here rather than by the caller. */
+    memset(&state, 0, sizeof(state));
+    snprintf(state.disk, sizeof(state.disk), "/operator/typed.qcow2");
+    state.disk_dirty = 1;
+    memset(&source, 0, sizeof(source));
+    snprintf(source.disk, sizeof(source.disk), "/engine/vm.qcow2");
+    /* The mark keeps the engine's own disk out until the operator's choice is
+     * resolved, so a second sync with the mark cleared is what is checked. */
+    assert(mg_ui_sync(&state, &source) == 0);
+    assert(strcmp(state.disk, "/operator/typed.qcow2") == 0);
+    /* Clearing the mark is the operator resolving the choice, after which the
+     * engine's record is adopted and the mark does not come back. */
+    state.disk_dirty = 0;
+    assert(mg_ui_sync(&state, &source) == 1);
+    assert(strcmp(state.disk, "/engine/vm.qcow2") == 0);
+    assert(state.disk_dirty == 0);
+    puts("uisync: an engine write clears the operator mark inside the rule");
+}
+
+static void test_operator_touch_marks_the_field(void)
+{
+    MgUiSyncState state;
+    memset(&state, 0, sizeof(state));
+    /* Untouched: the field stays the engine's to fill. */
+    assert(mg_ui_disk_touched(&state, "/engine/vm.qcow2", "/engine/vm.qcow2") == 0);
+    assert(state.disk_dirty == 0);
+    /* Typed by the operator: the field becomes theirs. */
+    assert(mg_ui_disk_touched(&state, "/engine/vm.qcow2", "/operator/typed.qcow2") == 1);
+    assert(state.disk_dirty == 1);
+    /* Cleared by the operator: still theirs, so the engine cannot refill it. */
+    memset(&state, 0, sizeof(state));
+    assert(mg_ui_disk_touched(&state, "/operator/typed.qcow2", "") == 1);
+    assert(state.disk_dirty == 1);
+    puts("uisync: typing or clearing a path marks it as the operator's");
+}
+
 static void test_operator_disk_is_never_replaced(void)
 {
     MgUiSyncState state;
@@ -152,6 +194,8 @@ int main(void)
 {
     test_agent_start_fills_the_form();
     test_engine_disk_replaces_a_stale_form_disk();
+    test_the_engine_clears_the_operator_mark();
+    test_operator_touch_marks_the_field();
     test_operator_disk_is_never_replaced();
     test_operator_choice_is_kept();
     test_empty_disk_is_refused();
