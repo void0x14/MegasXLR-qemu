@@ -87,7 +87,8 @@ typedef struct {
     unsigned char file_dirs[GUI_MAX_FILES];
 #endif
 } MgGui;
-static const char *gui_bus_names[] = {"ide", "virtio", "scsi", "nvme"};
+/* The controllers the form offers, kept with the rules that use them. */
+#define gui_bus_names mg_ui_bus_names
 static const char gui_bus_items[] = "ide\0virtio\0scsi\0nvme\0";
 
 static int gui_turkish(void)
@@ -275,13 +276,15 @@ static void gui_profile_sync(MgGui *ui)
      * is not the disk the running VM uses while it runs. */
     if (mg_json_field_bool(answer, "preflight_known", 0)) {
         ram = mg_json_field_int(answer, "preflight_ram_mb", 0);
-        if (ram >= 64 && ram <= 32768) ui->ram = ram;
-        if (mg_json_field_text(answer, "preflight_bus", value, sizeof(value))) {
-            int i;
-            for (i = 0; i < 4; ++i) if (!strcmp(value, gui_bus_names[i])) ui->bus_selected = i;
-            snprintf(ui->bus, sizeof(ui->bus), "%s", gui_bus_names[ui->bus_selected]);
-        }
-        ui->ram_dirty = ui->bus_dirty = ui->profile_missing = 0;
+        /* A value the operator chose is theirs: the recorded profile never
+         * replaces it, and the choice stays marked as theirs so that the
+         * next start sends it as well. */
+        (void)mg_ui_apply_profile(&ui->ram, ui->ram_dirty, ram, 64, 32768);
+        if (mg_json_field_text(answer, "preflight_bus", value, sizeof(value)))
+            (void)mg_ui_apply_profile_bus(&ui->bus_selected, ui->bus_dirty, value);
+        snprintf(ui->bus, sizeof(ui->bus), "%s", gui_bus_names[ui->bus_selected]);
+        /* The profile is known, so nothing is missing about it. */
+        ui->profile_missing = 0;
     } else {
         /* Unknown profile: only a disk image that already exists can hide a
          * different memory or controller, so that case waits for an answer. */

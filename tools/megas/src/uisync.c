@@ -6,14 +6,35 @@
 #include <stdio.h>
 #include <string.h>
 
+const char *const mg_ui_bus_names[4] = {"ide", "virtio", "scsi", "nvme"};
+
 static const char *ui_known_bus(const char *bus)
 {
+    int i;
     if (!bus || !bus[0]) return NULL;
-    if (!strcmp(bus, "ide")) return bus;
-    if (!strcmp(bus, "virtio")) return bus;
-    if (!strcmp(bus, "scsi")) return bus;
-    if (!strcmp(bus, "nvme")) return bus;
+    for (i = 0; i < 4; i++) if (!strcmp(bus, mg_ui_bus_names[i])) return bus;
     return NULL;
+}
+
+int mg_ui_apply_profile(int *field, int dirty, int value, int minimum, int maximum)
+{
+    if (!field || dirty) return 0;
+    if (value < minimum || value > maximum) return 0;
+    if (*field == value) return 0;
+    *field = value;
+    return 1;
+}
+
+int mg_ui_apply_profile_bus(int *selected, int dirty, const char *value)
+{
+    int i;
+    if (!selected || dirty || !ui_known_bus(value)) return 0;
+    for (i = 0; i < 4; i++) if (!strcmp(value, mg_ui_bus_names[i])) {
+        if (*selected == i) return 0;
+        *selected = i;
+        return 1;
+    }
+    return 0;
 }
 
 /* The needle is the key in quotes followed by its colon, so the value starts

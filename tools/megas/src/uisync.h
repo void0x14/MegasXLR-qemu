@@ -39,6 +39,18 @@ typedef struct {
  * deliberate choice. Returns 1 when any field changed. */
 int mg_ui_sync(MgUiSyncState *state, const MgUiSyncSource *source);
 
+/* The disk controllers the form offers, in the order it offers them. */
+extern const char *const mg_ui_bus_names[4];
+
+/* Apply a recorded profile to a form field. A value the operator chose is
+ * theirs: a profile never replaces it. Returns 1 when it was applied. */
+int mg_ui_apply_profile(int *field, int dirty, int value, int minimum, int maximum);
+
+/* Apply a recorded controller to the form. The controller belongs to the
+ * disk, so it comes from the profile, unless the operator chose one
+ * themselves. Returns 1 when it was applied. */
+int mg_ui_apply_profile_bus(int *selected, int dirty, const char *value);
+
 /* Whether the operator has changed a field themselves. The engine's own
  * write is not a change of theirs, so the two are told apart here rather
  * than by the caller: one rule, one place to keep correct. */

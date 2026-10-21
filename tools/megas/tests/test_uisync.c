@@ -362,6 +362,49 @@ static void test_memory_comes_with_the_disk_that_is_adopted(void)
     puts("uisync: memory and controller arrive with the disk they belong to");
 }
 
+static void test_a_recorded_profile_never_replaces_the_operator(void)
+{
+    int ram = 2112;
+    int selected = 0;
+    /* The operator chose the memory and the controller themselves. A recorded
+     * profile describes the disk, and it does not get to overrule them. */
+    assert(mg_ui_apply_profile(&ram, 1, 2048, 64, 32768) == 0);
+    assert(ram == 2112);
+    assert(mg_ui_apply_profile_bus(&selected, 1, "ide") == 0);
+    assert(selected == 0);
+    assert(mg_ui_apply_profile_bus(&selected, 1, "virtio") == 0);
+    assert(selected == 0);
+    /* A field the operator did not change takes the recorded value. */
+    {
+        int free_ram = 256;
+        int free_selected = 1;
+        assert(mg_ui_apply_profile(&free_ram, 0, 2048, 64, 32768) == 1);
+        assert(free_ram == 2048);
+        assert(mg_ui_apply_profile_bus(&free_selected, 0, "ide") == 1);
+        assert(free_selected == 0);
+        assert(mg_ui_apply_profile_bus(&free_selected, 0, "scsi") == 1);
+        assert(free_selected == 2);
+        /* The same value again changes nothing. */
+        assert(mg_ui_apply_profile_bus(&free_selected, 0, "scsi") == 0);
+    }
+    /* A value outside what a VM can have is never applied. */
+    {
+        int too_small = 256;
+        int too_large = 256;
+        assert(mg_ui_apply_profile(&too_small, 0, 8, 64, 32768) == 0);
+        assert(too_small == 256);
+        assert(mg_ui_apply_profile(&too_large, 0, 65536, 64, 32768) == 0);
+        assert(too_large == 256);
+    }
+    /* A controller the form does not offer is never applied. */
+    {
+        int chosen = 1;
+        assert(mg_ui_apply_profile_bus(&chosen, 0, "floppy") == 0);
+        assert(chosen == 1);
+    }
+    puts("uisync: a recorded profile never replaces what the operator chose");
+}
+
 int main(void)
 {
     test_agent_start_fills_the_form();
@@ -372,6 +415,7 @@ int main(void)
     test_operator_touch_marks_the_field();
     test_operator_disk_is_never_replaced();
     test_operator_choice_is_kept();
+    test_a_recorded_profile_never_replaces_the_operator();
     test_empty_disk_is_refused();
     test_resize_requires_a_live_guest();
     test_unknown_bus_is_not_adopted();
