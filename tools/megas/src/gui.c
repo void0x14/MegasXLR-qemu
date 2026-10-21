@@ -253,12 +253,13 @@ static void gui_state_sync(MgGui *ui)
     source.ram_mb = c->ram_mb;
     if (!mg_ui_sync(&state, &source)) return;
     if (strcmp(ui->disk, state.disk)) {
-        snprintf(ui->disk, sizeof(ui->disk), "%s", state.disk);
-        /* The editor holds its own copy of the text. Leaving it behind would
-         * make the next frame write the old text back and erase the disk the
-         * engine actually runs. */
-        gui_edit_load(&ui->editors[0], ui->disk);
-        snprintf(ui->editor_shadow[0], sizeof(ui->editor_shadow[0]), "%s", ui->disk);
+        /* The editor keeps its own copy of the text too: all three move
+         * together, or the editor writes the previous text back over the
+         * field on the next frame and the change is silently undone. */
+        gui_edit_load(&ui->editors[0], state.disk);
+        mg_ui_text_pair(ui->disk, sizeof(ui->disk),
+                        ui->editor_shadow[0], sizeof(ui->editor_shadow[0]),
+                        state.disk);
     }
     /* mg_ui_sync cleared the operator's mark because the engine filled this
      * field itself; an operator's own path is never taken back. */
@@ -669,6 +670,9 @@ static void gui_edit(MgGui *ui, int slot, char *field, size_t capacity)
         mg_ui_disk_touched(&state, ui->editor_shadow[slot], field);
         if (state.disk_dirty) ui->disk_dirty = 1;
     }
+    /* The shadow records what the field now holds, through the same write
+     * the field itself used, so the two cannot end up holding different
+     * text and the editor cannot write the previous one back. */
     snprintf(ui->editor_shadow[slot], sizeof(ui->editor_shadow[slot]), "%s", field);
 }
 

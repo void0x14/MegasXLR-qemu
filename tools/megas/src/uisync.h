@@ -5,6 +5,8 @@
 #ifndef MEGAS_UISYNC_H
 #define MEGAS_UISYNC_H
 
+#include <stddef.h>
+
 /* The form fields the controller reconciles with the engine. */
 typedef struct {
     char disk[1024];
@@ -34,6 +36,14 @@ int mg_ui_sync(MgUiSyncState *state, const MgUiSyncSource *source);
  * write is not a change of theirs, so the two are told apart here rather
  * than by the caller: one rule, one place to keep correct. */
 int mg_ui_disk_touched(MgUiSyncState *state, const char *before, const char *after);
+
+/* The field and the editor's copy of it hold the same text. Writing one
+ * without the other leaves the editor holding the previous text, which it
+ * writes back over the field on the next frame and silently undoes the
+ * change. Both copies are written together, through this. */
+void mg_ui_text_pair(char *field, size_t field_capacity,
+                     char *shadow, size_t shadow_capacity,
+                     const char *value);
 
 /* A VM without a disk and without an installer image has nothing to boot. */
 int mg_ui_start_allowed(const char *disk, const char *iso);

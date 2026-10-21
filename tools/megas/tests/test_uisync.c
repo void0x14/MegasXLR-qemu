@@ -190,6 +190,35 @@ static void test_named_vm_fills_the_form(void)
     puts("uisync: a named VM fills the form with the disk its record names");
 }
 
+static void test_the_field_and_the_editor_copy_never_diverge(void)
+{
+    char field[1024], shadow[1024];
+    char long_path[2048];
+    /* The engine fills the field. Both copies hold what it wrote. */
+    mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), "/engine/vm.qcow2");
+    assert(strcmp(field, shadow) == 0);
+    assert(strcmp(field, "/engine/vm.qcow2") == 0);
+    /* The operator clears the field. Both copies are empty, so the editor
+     * cannot put the previous path back. */
+    mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), "");
+    assert(field[0] == 0);
+    assert(shadow[0] == 0);
+    /* A path longer than the field is truncated into both copies, never
+     * into one only: a shadow holding the full text would compare unequal
+     * forever and keep reloading the editor. */
+    memset(long_path, 'a', sizeof(long_path) - 1);
+    long_path[sizeof(long_path) - 1] = 0;
+    mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), long_path);
+    assert(strlen(field) == sizeof(field) - 1);
+    assert(strcmp(field, shadow) == 0);
+    /* Repeated writes keep the two identical whatever the sequence. */
+    mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), "/a");
+    mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), "/b/c.qcow2");
+    mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), "");
+    assert(strcmp(field, shadow) == 0);
+    puts("uisync: the field and the editor's copy of it never diverge");
+}
+
 int main(void)
 {
     test_agent_start_fills_the_form();
@@ -202,6 +231,7 @@ int main(void)
     test_resize_requires_a_live_guest();
     test_unknown_bus_is_not_adopted();
     test_named_vm_fills_the_form();
+    test_the_field_and_the_editor_copy_never_diverge();
     puts("uisync: all controller state rules passed");
     return 0;
 }
