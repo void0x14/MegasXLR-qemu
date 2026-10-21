@@ -540,7 +540,7 @@ fail:
          * RLIMIT_DATA limits those allocations, not resident RSS; keep this
          * OCR child single-threaded so libgomp can stay within 48 MiB while
          * the separate RSS watchdog remains authoritative. */
-        if (memory_bytes && setenv("OMP_THREAD_LIMIT", "1", 1)) {
+        if (memory_bytes && (setenv("OMP_THREAD_LIMIT", "1", 1) || setenv("OMP_NUM_THREADS", "1", 1))) {
             spawn_child_fail(pipefd[1], errno);
         }
 #else
@@ -549,7 +549,7 @@ fail:
         if (memory_bytes) {
 #ifdef RLIMIT_DATA
             struct rlimit limit;
-            limit.rlim_cur = limit.rlim_max = (rlim_t)memory_bytes;
+            limit.rlim_cur = limit.rlim_max = (rlim_t)(memory_bytes * 2);
             if (setrlimit(RLIMIT_DATA, &limit)) {
                 spawn_child_fail(pipefd[1], errno);
             }
@@ -701,10 +701,13 @@ uint64_t mgp_memory_bytes(MgpProcess *process)
     snprintf(path, sizeof(path), "/proc/%ld/status", (long)process->host_pid);
     file = mgp_fopen(path, "r");
     if (!file) return 0;
+    unsigned long long anon = 0, rss = 0;
     while (fgets(line, sizeof(line), file)) {
-        if (sscanf(line, "VmRSS: %llu kB", &kb) == 1) break;
+        if (sscanf(line, "RssAnon: %llu kB", &anon) == 1) continue;
+        if (sscanf(line, "VmRSS: %llu kB", &rss) == 1) continue;
     }
     fclose(file);
+    kb = anon ? anon : rss;
     return (uint64_t)kb * 1024ULL;
 #else
     (void)process;
@@ -774,22 +777,46 @@ const char *mgp_real_qemu(const char *requested, char *out, size_t cap)
 {
     char env[1024];
     int is_i386 = (requested && strstr(requested, "i386")) ? 1 : 0;
+    int is_avr = (requested && strstr(requested, "avr")) ? 1 : 0;
     if (!mgp_env("MEGAS_REAL_QEMU", env, sizeof(env)) && env[0] && mgp_file_size(env)) {
         snprintf(out, cap, "%s", env);
         return out;
     }
 #ifndef _WIN32
-    if (is_i386) {
+    if (requested && requested[0]) {
+        const char *base = strrchr(requested, '/');
+        base = base ? base + 1 : requested;
+        if (strcmp(base, "megas") && strcmp(base, "megas-headless") &&
+            strcmp(base, "qemu") && strcmp(base, "qemu-system-x86_64") &&
+            strcmp(base, "qemu-system-i386") && strcmp(base, "qemu-system-avr")) {
+            char linktarget[1024];
+            ssize_t len = readlink(requested, linktarget, sizeof(linktarget) - 1);
+            if (len > 0) {
+                linktarget[len] = 0;
+                const char *tbase = strrchr(linktarget, '/');
+                tbase = tbase ? tbase + 1 : linktarget;
+                if (strcmp(tbase, "megas") && strcmp(tbase, "megas-headless") && mgp_file_size(requested)) {
+                    snprintf(out, cap, "%s", requested);
+                    return out;
+                }
+            } else if (mgp_file_size(requested)) {
+                snprintf(out, cap, "%s", requested);
+                return out;
+            }
+        }
+    }
+    if (is_avr) {
+        if (mgp_file_size("/usr/lib/megas/qemu-system-avr.bin")) {
+            snprintf(out, cap, "/usr/lib/megas/qemu-system-avr.bin");
+            return out;
+        }
+    } else if (is_i386) {
         if (mgp_file_size("/usr/lib/megas/qemu-system-i386.bin")) {
             snprintf(out, cap, "/usr/lib/megas/qemu-system-i386.bin");
             return out;
         }
         if (mgp_file_size("/usr/lib/megas/qemu-system-i386")) {
             snprintf(out, cap, "/usr/lib/megas/qemu-system-i386");
-            return out;
-        }
-        if (mgp_file_size("/usr/bin/qemu-system-i386.real")) {
-            snprintf(out, cap, "/usr/bin/qemu-system-i386.real");
             return out;
         }
     } else {
@@ -801,24 +828,6 @@ const char *mgp_real_qemu(const char *requested, char *out, size_t cap)
             snprintf(out, cap, "/usr/lib/megas/qemu-system-x86_64");
             return out;
         }
-        if (mgp_file_size("/usr/bin/qemu-system-x86_64.real")) {
-            snprintf(out, cap, "/usr/bin/qemu-system-x86_64.real");
-            return out;
-        }
-    }
-    if (requested && requested[0]) {
-        char linktarget[1024];
-        ssize_t len = readlink(requested, linktarget, sizeof(linktarget) - 1);
-        if (len > 0) {
-            linktarget[len] = 0;
-            if (!strstr(linktarget, "megas") && mgp_file_size(requested)) {
-                snprintf(out, cap, "%s", requested);
-                return out;
-            }
-        } else if (!strstr(requested, "megas") && mgp_file_size(requested)) {
-            snprintf(out, cap, "%s", requested);
-            return out;
-        }
     }
 #else
     if (requested && requested[0] && mgp_file_size(requested)) {
@@ -826,6 +835,6 @@ const char *mgp_real_qemu(const char *requested, char *out, size_t cap)
         return out;
     }
 #endif
-    snprintf(out, cap, "%s", is_i386 ? "qemu-system-i386" : "qemu-system-x86_64");
+    snprintf(out, cap, "%s", is_i386 ? "qemu-system-i386" : (is_avr ? "qemu-system-avr" : "qemu-system-x86_64"));
     return out;
 }

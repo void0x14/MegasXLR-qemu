@@ -1502,6 +1502,11 @@ static int tesseract_path(char *out, size_t capacity,
     if (strlen("tesseract") >= capacity) return -1;
     strcpy(out, "tesseract");
 #endif
+    if (!data_dir[0]) {
+        if (mgp_file_size("/usr/share/autopsy/autopsy/Tesseract-OCR/tessdata/eng.traineddata")) {
+            snprintf(data_dir, data_capacity, "/usr/share/autopsy/autopsy/Tesseract-OCR/tessdata");
+        }
+    }
     return 0;
 }
 static const char *ocr_status_name(int status)
@@ -1739,28 +1744,65 @@ int login_enabled=e->cfg.passwordless;
             }
             if (raw_count > 0) {
                 static char qemu_exec[1024];
-                mgp_real_qemu(raw_args[0], qemu_exec, sizeof(qemu_exec));
+                int i = 0;
+                if (raw_args[0][0] != '-') {
+                    mgp_real_qemu(raw_args[0], qemu_exec, sizeof(qemu_exec));
+                    i = 1;
+                    if (i < raw_count && raw_args[i][0] != '-' && strstr(raw_args[i], "qemu")) {
+                        mgp_real_qemu(raw_args[i], qemu_exec, sizeof(qemu_exec));
+                        i++;
+                    }
+                } else {
+                    mgp_real_qemu(NULL, qemu_exec, sizeof(qemu_exec));
+                    i = 0;
+                }
                 argv[n++] = qemu_exec;
-                int i = (raw_count > 0 && strstr(raw_args[0], "qemu")) ? 1 : 0;
                 while (i < raw_count && n < 480) {
                     if (!strcmp(raw_args[i], "-display")) {
-                        i += 2;
+                        i += (i + 1 < raw_count) ? 2 : 1;
                         continue;
                     }
-                    if (!strncmp(raw_args[i], "--display=", 10)) {
+                    if (!strncmp(raw_args[i], "--display=", 10) || !strncmp(raw_args[i], "-display=", 9)) {
                         i++;
                         continue;
                     }
                     if (!strcmp(raw_args[i], "-vnc")) {
-                        i += 2;
+                        i += (i + 1 < raw_count) ? 2 : 1;
                         continue;
                     }
-                    if (!strncmp(raw_args[i], "--vnc=", 6)) {
+                    if (!strncmp(raw_args[i], "--vnc=", 6) || !strncmp(raw_args[i], "-vnc=", 5)) {
+                        i++;
+                        continue;
+                    }
+                    if (!strcmp(raw_args[i], "-nographic") || !strcmp(raw_args[i], "-curses") || !strcmp(raw_args[i], "-daemonize")) {
+                        i++;
+                        continue;
+                    }
+                    if (!strcmp(raw_args[i], "-qmp")) {
+                        i += (i + 1 < raw_count) ? 2 : 1;
+                        continue;
+                    }
+                    if (!strncmp(raw_args[i], "-qmp=", 5) || !strncmp(raw_args[i], "--qmp=", 6)) {
                         i++;
                         continue;
                     }
                     if (strstr(raw_args[i], ".qcow2")) {
                         e->snapshot_supported = 1;
+                    }
+                    if (!e->cfg.disk[0]) {
+                        if (strstr(raw_args[i], "file=")) {
+                            const char *f = strstr(raw_args[i], "file=") + 5;
+                            const char *comma = strchr(f, ',');
+                            size_t flen = comma ? (size_t)(comma - f) : strlen(f);
+                            if (flen < sizeof(e->cfg.disk)) {
+                                memcpy(e->cfg.disk, f, flen);
+                                e->cfg.disk[flen] = 0;
+                            }
+                        } else if ((!strcmp(raw_args[i], "-hda") || !strcmp(raw_args[i], "-drive")) && i + 1 < raw_count) {
+                            if (raw_args[i + 1][0] != '-') {
+                                snprintf(e->cfg.disk, sizeof(e->cfg.disk), "%s", raw_args[i + 1]);
+                            }
+                        }
                     }
                     argv[n++] = raw_args[i++];
                 }
@@ -1784,6 +1826,11 @@ int login_enabled=e->cfg.passwordless;
     if(config_string(j,"qemu",e->cfg.qemu,sizeof(e->cfg.qemu))||config_string(j,"disk",e->cfg.disk,sizeof(e->cfg.disk))||config_string(j,"iso",e->cfg.iso,sizeof(e->cfg.iso))||config_string(j,"seed_iso",e->cfg.seed_iso,sizeof(e->cfg.seed_iso))){feedback(e,"A file path is missing, too long or invalid JSON text.");
 VM_START_FAIL();
 }
+    {
+        char resolved_qemu[sizeof(e->cfg.qemu)];
+        mgp_real_qemu(e->cfg.qemu, resolved_qemu, sizeof(resolved_qemu));
+        snprintf(e->cfg.qemu, sizeof(e->cfg.qemu), "%s", resolved_qemu);
+    }
     snprintf(username,sizeof(username),"megas");
     if(config_string(j,"username",username,sizeof(username))||config_string(j,"password",password,sizeof(password))){feedback(e,"Guest username or password exceeds its supported size.");wipe_memory(password,sizeof(password));return -1;}
     {int policy=jget(j,0,"passwordless");
@@ -1810,7 +1857,7 @@ snprintf(vnc,sizeof(vnc),"127.0.0.1:%u",e->cfg.vnc_port-5900);
     snprintf(qga,sizeof(qga),"socket,id=megas-qga,host=127.0.0.1,port=%u,server=on,wait=off",e->cfg.qga_port);
 
     snprintf(memory,sizeof(memory),"%u",e->cfg.ram_mb);
-snprintf(video,sizeof(video),"virtio-vga,xres=%u,yres=%u",e->cfg.width,e->cfg.height);
+    snprintf(video,sizeof(video),"VGA,edid=on,xres=%u,yres=%u",e->cfg.width,e->cfg.height);
 
     argv[n++]=e->cfg.qemu;
 argv[n++]="-m";
@@ -1904,6 +1951,10 @@ argv[n++]=bios;
     if(!mgp_env("MEGAS_QEMU_DATA_DIR",data_dir,sizeof(data_dir))){argv[n++]="-L";
 argv[n++]=data_dir;
 }
+    if (mgp_file_size("/usr/share/qemu/bios-256k.bin")) {
+        argv[n++] = "-L";
+        argv[n++] = "/usr/share/qemu";
+    }
     argv[n]=NULL;
 spawn_vm:
     e->disk_base=0;
