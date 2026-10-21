@@ -771,7 +771,7 @@ static void gui_settings(MgGui *ui)
     }
     nk_layout_row_dynamic(ctx, ui->row, 1);
     if (nk_button_label(ctx, tr("Ekran boyutunu uygula", "Apply screen size"))) {
-        snprintf(request, sizeof(request), "{\"action\":\"resize\",\"width\":%d,\"height\":%d}", ui->vm_w, ui->vm_h);
+        snprintf(request, sizeof(request), "{\"action\":\"resize\",\"width\":%d,\"height\":%d,\"checkpoint\":false}", ui->vm_w, ui->vm_h);
         gui_queue(ui, request);
     }
     nk_layout_row_dynamic(ctx, ui->row*2, 1);

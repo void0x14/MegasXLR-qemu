@@ -749,9 +749,13 @@ if(ret<0||j->t[ret].type!='[')failed=1;
         int inserted=jget(j,i,"inserted"),node,drv,image,format,actual;
         if(inserted<0||j->t[inserted].type!='{')continue;
         node=jget(j,inserted,"node-name");
-        if(node<0||!jeq(j,node,"megasdisk"))continue;
-        matches++;
         drv=jget(j,inserted,"drv");
+        if(node>=0&&jeq(j,node,"megasdisk")){
+            /* explicit megasdisk */
+        } else if(matches==0&&drv>=0&&jeq(j,drv,"qcow2")){
+            /* primary qcow2 disk */
+        } else continue;
+        matches++;
         image=jget(j,inserted,"image");
         if(image>=0&&j->t[image].type=='{')image_for_catalog=image;
         format=image>=0&&j->t[image].type=='{'?jget(j,image,"format"):-1;
@@ -2774,7 +2778,7 @@ goto done;
 goto done;
 }
         if(!e->status.running && (!strcmp(action,"type") || !strcmp(action,"click") || !strcmp(action,"pointer") || !strcmp(action,"key")) && !jeq(j,jget(j,0,"down"),"false")) {feedback(e,"The VM is paused; resume it before input so keys are not discarded.");goto done;}
-        capture=e->auto_checkpoint&&e->snapshot_supported&&!jeq(j,jget(j,0,"checkpoint"),"false");
+        capture=e->auto_checkpoint&&e->snapshot_supported&&e->snapshot_catalog_available&&!jeq(j,jget(j,0,"checkpoint"),"false");
 
         if(capture){char desired[64];snprintf(desired,sizeof(desired),"step-%llu-before",(unsigned long long)h->step);
 if(snapshot_save(e,desired,1,h->before,sizeof(h->before)))goto done;
