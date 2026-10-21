@@ -377,6 +377,8 @@ MgpSocket mgp_listen(unsigned port)
     struct sockaddr_in addr;
     MgpSocket s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == MGP_BAD_SOCKET) return s;
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
     mgp_nonblock(s);
     memset(&addr, 0, sizeof(addr)); addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); addr.sin_port = htons((unsigned short)port);
@@ -767,4 +769,63 @@ void mgp_owner_unlock(intptr_t lock)
 #else
     close((int)lock);
 #endif
+}
+const char *mgp_real_qemu(const char *requested, char *out, size_t cap)
+{
+    char env[1024];
+    int is_i386 = (requested && strstr(requested, "i386")) ? 1 : 0;
+    if (!mgp_env("MEGAS_REAL_QEMU", env, sizeof(env)) && env[0] && mgp_file_size(env)) {
+        snprintf(out, cap, "%s", env);
+        return out;
+    }
+#ifndef _WIN32
+    if (is_i386) {
+        if (mgp_file_size("/usr/lib/megas/qemu-system-i386.bin")) {
+            snprintf(out, cap, "/usr/lib/megas/qemu-system-i386.bin");
+            return out;
+        }
+        if (mgp_file_size("/usr/lib/megas/qemu-system-i386")) {
+            snprintf(out, cap, "/usr/lib/megas/qemu-system-i386");
+            return out;
+        }
+        if (mgp_file_size("/usr/bin/qemu-system-i386.real")) {
+            snprintf(out, cap, "/usr/bin/qemu-system-i386.real");
+            return out;
+        }
+    } else {
+        if (mgp_file_size("/usr/lib/megas/qemu-system-x86_64.bin")) {
+            snprintf(out, cap, "/usr/lib/megas/qemu-system-x86_64.bin");
+            return out;
+        }
+        if (mgp_file_size("/usr/lib/megas/qemu-system-x86_64")) {
+            snprintf(out, cap, "/usr/lib/megas/qemu-system-x86_64");
+            return out;
+        }
+        if (mgp_file_size("/usr/bin/qemu-system-x86_64.real")) {
+            snprintf(out, cap, "/usr/bin/qemu-system-x86_64.real");
+            return out;
+        }
+    }
+    if (requested && requested[0]) {
+        char linktarget[1024];
+        ssize_t len = readlink(requested, linktarget, sizeof(linktarget) - 1);
+        if (len > 0) {
+            linktarget[len] = 0;
+            if (!strstr(linktarget, "megas") && mgp_file_size(requested)) {
+                snprintf(out, cap, "%s", requested);
+                return out;
+            }
+        } else if (!strstr(requested, "megas") && mgp_file_size(requested)) {
+            snprintf(out, cap, "%s", requested);
+            return out;
+        }
+    }
+#else
+    if (requested && requested[0] && mgp_file_size(requested)) {
+        snprintf(out, cap, "%s", requested);
+        return out;
+    }
+#endif
+    snprintf(out, cap, "%s", is_i386 ? "qemu-system-i386" : "qemu-system-x86_64");
+    return out;
 }

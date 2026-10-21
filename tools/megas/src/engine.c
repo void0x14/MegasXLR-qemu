@@ -1236,7 +1236,7 @@ snprintf(cfg->runtime_dir,sizeof(cfg->runtime_dir),"%.900s/.local/state/megas",b
 #endif
     }
     base=mgp_env("MEGAS_QEMU",env,sizeof(env))?NULL:env;
-snprintf(cfg->qemu,sizeof(cfg->qemu),"%s",base?base:"qemu-system-x86_64");
+    mgp_real_qemu(base,cfg->qemu,sizeof(cfg->qemu));
 cfg->ram_mb=256;
 cfg->width=1280;
 cfg->height=720;
@@ -1701,11 +1701,11 @@ static void ocr_tick(MgEngine *e)
 static int vm_start(MgEngine *e,Json *j) {
     char qmp[128],vnc[128],qga[160],memory[32],video[128],disk[4096],cdrom[4096],seed_file[4096],seed_raw[512],seed_path[1024],username[33],password[257]="",bios[1024],error[512],data_dir[1024],helpers[1024];
 
-    char *argv[48];
+    char *argv[512];
 int n=0;
 Buffer b;
     const char *extension;
-char checkpoint_status[192];
+char checkpoint_status[192]="";
 int login_enabled=e->cfg.passwordless;
 #define VM_START_FAIL() do { wipe_memory(password,sizeof(password)); return -1; } while (0)
 
@@ -1717,6 +1717,70 @@ int login_enabled=e->cfg.passwordless;
         feedback(e,"Control reconnected to the owned VM. Current state is confirmed; previous uncertain actions were not replayed.");
         return 0;
 }
+    {
+        int raw_token = jget(j, 0, "raw_argv");
+        if (raw_token < 0) raw_token = jget(j, 0, "args");
+        if (raw_token >= 0 && j->t[raw_token].type == '[') {
+            static char arg_buf[65536];
+            char *raw_args[512];
+            size_t arg_used = 0;
+            int raw_count = 0;
+            int k;
+            for (k = raw_token + 1; k < j->n && raw_count < 500; k++) {
+                if (j->t[k].parent != raw_token) continue;
+                if (j->t[k].type == 's') {
+                    if (arg_used + 4096 < sizeof(arg_buf)) {
+                        if (!jstring(j, k, arg_buf + arg_used, sizeof(arg_buf) - arg_used)) {
+                            raw_args[raw_count++] = arg_buf + arg_used;
+                            arg_used += strlen(arg_buf + arg_used) + 1;
+                        }
+                    }
+                }
+            }
+            if (raw_count > 0) {
+                static char qemu_exec[1024];
+                mgp_real_qemu(raw_args[0], qemu_exec, sizeof(qemu_exec));
+                argv[n++] = qemu_exec;
+                int i = (raw_count > 0 && strstr(raw_args[0], "qemu")) ? 1 : 0;
+                while (i < raw_count && n < 480) {
+                    if (!strcmp(raw_args[i], "-display")) {
+                        i += 2;
+                        continue;
+                    }
+                    if (!strncmp(raw_args[i], "--display=", 10)) {
+                        i++;
+                        continue;
+                    }
+                    if (!strcmp(raw_args[i], "-vnc")) {
+                        i += 2;
+                        continue;
+                    }
+                    if (!strncmp(raw_args[i], "--vnc=", 6)) {
+                        i++;
+                        continue;
+                    }
+                    if (strstr(raw_args[i], ".qcow2")) {
+                        e->snapshot_supported = 1;
+                    }
+                    argv[n++] = raw_args[i++];
+                }
+                argv[n++] = "-display";
+                argv[n++] = "none";
+                argv[n++] = "-vnc";
+                snprintf(vnc, sizeof(vnc), "127.0.0.1:%u", e->cfg.vnc_port - 5900);
+                argv[n++] = vnc;
+                argv[n++] = "-qmp";
+                snprintf(qmp, sizeof(qmp), "tcp:127.0.0.1:%u,server=on,wait=off", e->cfg.qmp_port);
+                argv[n++] = qmp;
+                if (mgp_file_size("/usr/share/qemu/bios-256k.bin")) {
+                    argv[n++] = "-L";
+                    argv[n++] = "/usr/share/qemu";
+                }
+                argv[n] = NULL;
+                goto spawn_vm;
+            }
+        }
+    }
     if(config_string(j,"qemu",e->cfg.qemu,sizeof(e->cfg.qemu))||config_string(j,"disk",e->cfg.disk,sizeof(e->cfg.disk))||config_string(j,"iso",e->cfg.iso,sizeof(e->cfg.iso))||config_string(j,"seed_iso",e->cfg.seed_iso,sizeof(e->cfg.seed_iso))){feedback(e,"A file path is missing, too long or invalid JSON text.");
 VM_START_FAIL();
 }
@@ -1841,10 +1905,11 @@ argv[n++]=bios;
 argv[n++]=data_dir;
 }
     argv[n]=NULL;
-e->disk_base=0;
-e->disk_base_known=0;
-e->snapshot_count=0;
-e->snapshot_catalog_available=0;
+spawn_vm:
+    e->disk_base=0;
+    e->disk_base_known=0;
+    e->snapshot_count=0;
+    e->snapshot_catalog_available=0;
 
     {char command[REQUEST_CAP];
 Buffer audit;
@@ -1855,6 +1920,7 @@ bstr(&audit,argv[n]);
 }bput(&audit,"]");
 if(journal(e,"process_spawn",command))VM_START_FAIL();
 }
+    mgp_setenv("MEGAS_AUTH_ACTIVE", "1");
     if(mgp_spawn(&e->process,argv,e->qemu_log,error,sizeof(error))){feedback(e,"%s",error);
 VM_START_FAIL();
 }

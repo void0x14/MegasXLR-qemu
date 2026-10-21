@@ -54,4 +54,5 @@ void mgp_force_kill(MgpProcess *process);
 void mgp_reap(MgpProcess *process);
 int mgp_owner_lock(const char *path, intptr_t *lock);
 void mgp_owner_unlock(intptr_t lock);
+const char *mgp_real_qemu(const char *requested, char *out, size_t cap);
 #endif

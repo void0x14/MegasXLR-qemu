@@ -7,15 +7,123 @@
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/types.h>
+#endif
 static volatile sig_atomic_t closing;
 int mg_interrupted(void){return closing != 0;}
 static void stop_signal(int signal_number){(void)signal_number;closing=1;}
 static void json_string(const char *s){const unsigned char *p=(const unsigned char*)s;putchar('"');while(*p){switch(*p){case '"':fputs("\\\"",stdout);break;case '\\':fputs("\\\\",stdout);break;case '\n':fputs("\\n",stdout);break;case '\r':fputs("\\r",stdout);break;case '\t':fputs("\\t",stdout);break;default:if(*p<32)printf("\\u%04x",*p);else putchar(*p);}p++;}putchar('"');}
 static int value(const char *s,unsigned *out){char *end;unsigned long n;errno=0;n=strtoul(s,&end,10);if(errno||*end||n<1||n>65535)return -1;*out=(unsigned)n;return 0;}
 static void usage(void){puts("Megas — native VM owner and agent control\n\nmegas [--runtime DIR] [--port PORT] [--qmp-port PORT] [--vnc-port PORT] gui|serve\nmegas [options] status|steps|repair|pause|resume|stop\nmegas [options] send '{\"action\":\"start\",\"disk\":\"work.qcow2\"}'\nmegas [options] agent [--text-only]\nmegas [options] hook SessionStart|PreToolUse|PostToolUse|UserPromptSubmit\n\nCommands always return current VM state and latest live image/fallback.\nThe controller owns QEMU; its process and commands are audited in actions.jsonl.");}
+static int is_qemu_invocation(int argc, char **argv) {
+    if (argc < 1) return 0;
+    const char *prog = argv[0];
+    const char *slash = strrchr(prog, '/');
+    if (slash) prog = slash + 1;
+    if (strstr(prog, "qemu")) return 1;
+    if (argc > 1 && argv[1][0] == '-') {
+        if (!strcmp(argv[1], "--runtime") || !strcmp(argv[1], "--port") ||
+            !strcmp(argv[1], "--qmp-port") || !strcmp(argv[1], "--vnc-port") ||
+            !strcmp(argv[1], "--help")) {
+            return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
 static int mg_main(int argc,char **argv){
     MgConfig cfg;MgEngine *engine;char *response;char request[8192];int i=1,result=0;
     mg_config_defaults(&cfg);
+    if (is_qemu_invocation(argc, argv)) {
+        if (argc > 1 && (!strcmp(argv[1], "--version") || !strcmp(argv[1], "-version"))) {
+            char real_qemu[1024];
+            mgp_real_qemu(argv[0], real_qemu, sizeof(real_qemu));
+            argv[0] = real_qemu;
+            execv(real_qemu, argv);
+            puts("QEMU emulator version 9.1.0 (MegasXLR integrated)");
+            return 0;
+        }
+        if (argc > 1 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-help") || !strcmp(argv[1], "-h"))) {
+            char real_qemu[1024];
+            mgp_real_qemu(argv[0], real_qemu, sizeof(real_qemu));
+            argv[0] = real_qemu;
+            usage();
+            return 0;
+        }
+        if (argc == 1) {
+            char *resp = malloc(65536);
+            if (resp && mg_client(cfg.control_port, "{\"action\":\"status\"}", resp, 65536) == 0) {
+                printf("MegasXLR: VM Komuta Merkezi is active on localhost:%u.\n", cfg.control_port);
+                puts(resp);
+                free(resp);
+                return 0;
+            }
+            free(resp);
+        }
+        if (argc > 1) {
+            char *raw_req = malloc(65536);
+            char *resp = malloc(65536);
+            if (!raw_req || !resp) { free(raw_req); free(resp); return 1; }
+            strcpy(raw_req, "{\"action\":\"start\",\"raw_argv\":[");
+            size_t req_len = strlen(raw_req);
+            for (int arg_idx = 0; arg_idx < argc; arg_idx++) {
+                if (arg_idx) { raw_req[req_len++] = ','; raw_req[req_len] = 0; }
+                raw_req[req_len++] = '"';
+                const char *p = argv[arg_idx];
+                while (*p && req_len + 10 < 65000) {
+                    if (*p == '"') { raw_req[req_len++] = '\\'; raw_req[req_len++] = '"'; }
+                    else if (*p == '\\') { raw_req[req_len++] = '\\'; raw_req[req_len++] = '\\'; }
+                    else if (*p == '\n') { raw_req[req_len++] = '\\'; raw_req[req_len++] = 'n'; }
+                    else if (*p == '\r') { raw_req[req_len++] = '\\'; raw_req[req_len++] = 'r'; }
+                    else if (*p == '\t') { raw_req[req_len++] = '\\'; raw_req[req_len++] = 't'; }
+                    else raw_req[req_len++] = *p;
+                    p++;
+                }
+                raw_req[req_len++] = '"';
+                raw_req[req_len] = 0;
+            }
+            strcpy(raw_req + req_len, "]}");
+
+            int owner_running = (mg_client(cfg.control_port, "{\"action\":\"status\"}", resp, 65536) == 0);
+            if (!owner_running) {
+#ifndef _WIN32
+                pid_t pid = fork();
+                if (pid == 0) {
+                    setsid();
+                    execlp("megas", "megas", "gui", NULL);
+                    _exit(1);
+                }
+                uint64_t deadline = mgp_now() + 5000;
+                while (mgp_now() < deadline) {
+                    mgp_sleep(100);
+                    if (mg_client(cfg.control_port, "{\"action\":\"status\"}", resp, 65536) == 0) {
+                        owner_running = 1;
+                        break;
+                    }
+                }
+#endif
+            }
+            result = mg_client(cfg.control_port, raw_req, resp, 65536);
+            printf("MegasXLR: QEMU command intercepted -> displaying in Megas Komuta Merkezi.\n");
+            fflush(stdout);
+            free(raw_req);
+
+            signal(SIGINT, stop_signal);
+            signal(SIGTERM, stop_signal);
+            while (!closing) {
+                mgp_sleep(500);
+                if (mg_client(cfg.control_port, "{\"action\":\"status\"}", resp, 65536) != 0) break;
+                if (strstr(resp, "\"phase\":\"stopped\"") || strstr(resp, "\"phase\":\"exited\"")) break;
+            }
+            if (closing) {
+                mg_client(cfg.control_port, "{\"action\":\"stop\"}", resp, 65536);
+            }
+            free(resp);
+            return 0;
+        }
+    }
     while(i<argc&&argv[i][0]=='-'&&strcmp(argv[i],"--help")){
         const char *option=argv[i++];if(i>=argc){usage();return 2;}
         if(!strcmp(option,"--runtime")){if(strlen(argv[i])>=sizeof(cfg.runtime_dir))return 2;strcpy(cfg.runtime_dir,argv[i]);
