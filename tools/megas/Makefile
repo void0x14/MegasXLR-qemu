@@ -27,9 +27,12 @@ GUI_LIBS = -lX11 -lm
 CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 endif
 
-.PHONY: all headless clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle test-evidence bundle
+.PHONY: all headless build clean test test-rfb test-platform test-seed test-engine test-guest test-smoke test-live test-agent test-bundle test-evidence bundle
 all: $(BUILD)/megas$(EXE)
 headless: $(BUILD)/megas-headless$(EXE)
+# Both programs, because building only the headless one leaves the window's
+# own code untested and stale.
+build: all headless
 $(BUILD):
 	mkdir -p "$@"
 $(BUILD)/megas$(EXE): $(COMMON) src/gui.c $(wildcard $(HEADERS)) $(wildcard vendor/*.h) | $(BUILD)
@@ -61,11 +64,13 @@ $(BUILD)/test-guest: tests/test_guest.c src/guest.c src/platform.c $(wildcard sr
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -pthread -o "$@" tests/test_guest.c src/guest.c src/platform.c $(LDLIBS)
 test-guest: $(BUILD)/test-guest
 	"$(BUILD)/test-guest"
-test: test-rfb test-platform test-seed test-uisync test-engine test-guest test-bundle test-evidence test-live test-agent
+# The window's code is built too: a change in it must not pass a test run
+# that never compiled it.
+test: all test-rfb test-platform test-seed test-uisync test-engine test-guest test-bundle test-evidence test-live test-agent
 else
 test-engine test-guest:
 	@echo "SKIP: $@ uses POSIX-only test fixtures and is not run on Windows."
-test: test-rfb test-platform test-seed test-uisync test-bundle test-evidence test-live test-agent
+test: all test-rfb test-platform test-seed test-uisync test-bundle test-evidence test-live test-agent
 endif
 test-bundle:
 	$(PYTHON) tests/test_bundle.py

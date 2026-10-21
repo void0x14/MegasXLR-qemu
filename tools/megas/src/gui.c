@@ -258,13 +258,15 @@ static void gui_profile_sync(MgGui *ui)
 {
     char request[1200], path[1024], value[64], answer[65536];
     int ram;
-    if (!strcmp(ui->disk, ui->preflight_disk)) return;
     /* A path with nothing behind it has no profile to ask for. Asking about
      * the empty path would only reach the engine to be told the same. */
     if (!ui->disk[0]) { ui->preflight_disk[0] = 0; return; }
     if (!json_string(path, sizeof(path), ui->disk)) return;
     snprintf(request, sizeof(request), "{\"action\":\"preflight\",\"disk\":%s}", path);
     ui->preflight_disk[0] = 0;
+    /* The profile is asked for every time, not only when the path changes.
+     * What the engine knows about a disk can change between two starts, and
+     * a start must decide on the profile as it is now. */
     (void)mg_engine_submit(ui->engine, request, answer, sizeof(answer));
     gui_wipe(request, sizeof(request));
     if (!mg_json_has(answer, "preflight_known")) return;
