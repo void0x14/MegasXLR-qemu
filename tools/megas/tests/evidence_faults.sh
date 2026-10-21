@@ -6,7 +6,16 @@
 # status string alone: the journal must carry the reason.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BINARY="${1:-$ROOT/build/megas-headless}"
+# Without a given binary the script builds a fresh one. A stale binary from an
+# earlier build would report faults that no longer exist.
+BINARY="${1:-}"
+if [ -z "$BINARY" ]; then
+  BINARY="$ROOT/build-evidence/megas-headless"
+  ( cd "$ROOT" && make BUILD=build-evidence headless >/dev/null 2>&1 ) || {
+    echo "could not build the controller; run make headless first" >&2
+    exit 2
+  }
+fi
 WORK="$(mktemp -d /tmp/megas-evidence-XXXXXX)"
 REAL_HOME="${HOME}"
 HOME_DIR="$WORK/home"
@@ -15,6 +24,7 @@ DISK="$WORK/winlpe.qcow2"
 PORT=49691
 QMP=49692
 VNC=49693
+OWNER_PID=""
 FAILURES=0
 mkdir -p "$HOME_DIR" "$RUNTIME"
 export HOME="$HOME_DIR"
@@ -24,9 +34,7 @@ pass() { printf 'PASS %s\n' "$1"; }
 fail() { printf 'FAIL %s: %s\n' "$1" "$2"; FAILURES=$((FAILURES+1)); }
 
 cleanup() {
-  "$BINARY" --runtime "$RUNTIME" --port "$PORT" send '{"action":"stop"}' >/dev/null 2>&1
-  sleep 0.3
-  pkill -f "megas-evidence" >/dev/null 2>&1
+  [ -n "$OWNER_PID" ] && kill "$OWNER_PID" >/dev/null 2>&1
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -34,6 +42,7 @@ trap cleanup EXIT
 owner() {
   "$BINARY" --runtime "$RUNTIME" --port "$PORT" --qmp-port "$QMP" --vnc-port "$VNC" serve \
     >"$WORK/owner.log" 2>&1 &
+  OWNER_PID=$!
   for _ in $(seq 1 50); do
     [ -f "$RUNTIME/session-$PORT.token" ] && return 0
     sleep 0.1

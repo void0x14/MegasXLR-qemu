@@ -39,28 +39,28 @@ $(BUILD)/megas-headless$(EXE): $(COMMON) $(wildcard $(HEADERS)) | $(BUILD)
 $(BUILD)/test-rfb$(EXE): tests/test_rfb.c src/rfb.c $(wildcard src/rfb.h) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_rfb.c $(CORE_LIBS) $(LDLIBS)
 test-rfb: $(BUILD)/test-rfb$(EXE)
-	"./$(BUILD)/test-rfb$(EXE)"
+	"$(BUILD)/test-rfb$(EXE)"
 $(BUILD)/test-platform$(EXE): tests/test_platform.c src/platform.c $(wildcard src/platform.h) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_platform.c src/platform.c $(CORE_LIBS) $(LDLIBS)
 test-platform: $(BUILD)/test-platform$(EXE)
-	"./$(BUILD)/test-platform$(EXE)"
+	"$(BUILD)/test-platform$(EXE)"
 $(BUILD)/test-seed$(EXE): tests/test_seed.c src/seed.c src/platform.c $(wildcard src/seed.h src/platform.h) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_seed.c src/seed.c src/platform.c $(CORE_LIBS) $(LDLIBS)
 test-seed: $(BUILD)/test-seed$(EXE)
-	"./$(BUILD)/test-seed$(EXE)"
+	"$(BUILD)/test-seed$(EXE)"
 ifeq ($(WINDOWS),0)
 $(BUILD)/test-uisync$(EXE): tests/test_uisync.c src/uisync.c $(wildcard src/uisync.h) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_uisync.c src/uisync.c $(CORE_LIBS) $(LDLIBS)
 test-uisync: $(BUILD)/test-uisync$(EXE)
-	"./$(BUILD)/test-uisync$(EXE)"
+	"$(BUILD)/test-uisync$(EXE)"
 $(BUILD)/test-engine: tests/test_engine.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c src/uisync.c $(wildcard $(HEADERS)) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/test_engine.c src/engine.c src/platform.c src/rfb.c src/agent.c src/guest.c src/seed.c src/uisync.c -lm $(LDLIBS)
 test-engine: $(BUILD)/test-engine
-	"./$(BUILD)/test-engine"
+	MEGAS_PACKAGE_DIR="$(CURDIR)" "$(BUILD)/test-engine$(EXE)"
 $(BUILD)/test-guest: tests/test_guest.c src/guest.c src/platform.c $(wildcard src/guest.h src/platform.h) | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -pthread -o "$@" tests/test_guest.c src/guest.c src/platform.c $(LDLIBS)
 test-guest: $(BUILD)/test-guest
-	"./$(BUILD)/test-guest"
+	"$(BUILD)/test-guest"
 test: test-rfb test-platform test-seed test-uisync test-engine test-guest test-bundle test-evidence test-live test-agent
 else
 test-engine test-guest:
@@ -70,8 +70,7 @@ endif
 test-bundle:
 	$(PYTHON) tests/test_bundle.py
 test-evidence: headless
-	sh tests/evidence_faults.sh "$(BUILD)/megas-headless$(EXE)"
-test-smoke test-live: headless
+	sh tests/evidence_faults.sh "$(BUILD)/megas-headless$(EXE)"test-smoke test-live: headless
 	$(PYTHON) tests/test_live.py "$(BUILD)/megas-headless$(EXE)" --report "$(BUILD)/live-report.json"
 test-agent: headless
 	$(PYTHON) tests/test_agent.py "$(BUILD)/megas-headless$(EXE)"

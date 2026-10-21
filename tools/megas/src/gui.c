@@ -259,6 +259,9 @@ static void gui_state_sync(MgGui *ui)
          * engine actually runs. */
         gui_edit_load(&ui->editors[0], ui->disk);
         snprintf(ui->editor_shadow[0], sizeof(ui->editor_shadow[0]), "%s", ui->disk);
+        /* This change came from the engine, not from the operator, so the
+         * field is not marked as their choice. */
+        ui->disk_dirty = 0;
     }
     if (strcmp(ui->iso, state.iso)) snprintf(ui->iso, sizeof(ui->iso), "%s", state.iso);
     if (strcmp(ui->bus, state.bus)) {
@@ -650,16 +653,17 @@ static void gui_edit(MgGui *ui, int slot, char *field, size_t capacity)
     nk_edit_buffer(ui->ctx, slot == 7 ? (NK_EDIT_SIMPLE|NK_EDIT_SELECTABLE) : NK_EDIT_FIELD,
                    edit, nk_filter_default);
     /* Nuklear stores code points in `string.len` and UTF-8 bytes in the
-     * string buffer. The external field capacity and memcpy are byte based. */
+     * string buffer. The external field capacity and memcpy are byte based.
+     * An emptied field is written back as empty, so clearing the disk path
+     * really clears it instead of restoring the previous value. */
     n = nk_str_len_char(&edit->string);
     if (n >= (int)capacity) n = (int)capacity-1;
     if (n > 0) memcpy(field, nk_str_get_const(&edit->string), (size_t)n);
     field[n] = 0;
-    if (slot == 0 && strcmp(ui->editor_shadow[slot], field)) {
-        /* The operator named this disk themselves. The engine's own record
-         * never replaces that choice, so the form keeps what was asked for. */
-        ui->disk_dirty = 1;
-    }
+    /* A path the operator typed is theirs. The engine's own record never
+     * takes it back, so a cleared path stays cleared instead of filling
+     * itself again and starting the previous VM. */
+    if (slot == 0 && strcmp(ui->editor_shadow[slot], field)) ui->disk_dirty = 1;
     snprintf(ui->editor_shadow[slot], sizeof(ui->editor_shadow[slot]), "%s", field);
 }
 
@@ -1688,15 +1692,17 @@ int mg_gui_run(MgEngine *engine)
     gui_palette(ui->ctx);
     while(ui->alive && !mg_interrupted()) {
         mg_engine_tick(engine);
-        /* A VM the agent started never passes through this window's own
-         * queue, so the engine's own record is read back every frame. */
-        gui_state_sync(ui);
         if (strcmp(ui->seen_feedback,mg_engine_status(engine)->feedback) != 0) {
             snprintf(ui->seen_feedback,sizeof(ui->seen_feedback),"%s",mg_engine_status(engine)->feedback);
             if (!ui->pending[0]) gui_note(ui,ui->seen_feedback);
         }
         nk_input_begin(ui->ctx);gui_native_events(ui);nk_input_end(ui->ctx);
         gui_draw(ui);gui_render(ui);
+        /* A VM the agent started never passes through this window's own queue,
+         * so the engine's own record is read back after the frame. The draw
+         * comes first, so a path the operator typed is seen before the engine
+         * can claim the field. */
+        gui_state_sync(ui);
         /* The working feedback has been painted before bounded operations run. */
         gui_execute_pending(ui);
 #ifdef _WIN32

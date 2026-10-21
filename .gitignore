@@ -23,3 +23,4 @@ GTAGS
 tools/megas/build-da/
 tools/megas/build-*/
 .opencode/
+tools/megas/build-evidence/
