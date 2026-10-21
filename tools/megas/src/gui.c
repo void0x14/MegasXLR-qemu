@@ -298,6 +298,9 @@ static void gui_profile_sync(MgGui *ui)
     char request[1200], path[1024], value[64], answer[65536];
     int ram;
     if (!strcmp(ui->disk, ui->preflight_disk)) return;
+    /* A path with nothing behind it has no profile to ask for. Asking about
+     * the empty path would only reach the engine to be told the same. */
+    if (!ui->disk[0]) { ui->preflight_disk[0] = 0; return; }
     if (!json_string(path, sizeof(path), ui->disk)) return;
     snprintf(request, sizeof(request), "{\"action\":\"preflight\",\"disk\":%s}", path);
     ui->preflight_disk[0] = 0;
@@ -325,12 +328,14 @@ static void gui_start(MgGui *ui)
 {
     char qemu[6144], disk[6144], iso[6144], username[768], password[1536], request[22000];
     const MgStatus *status = mg_engine_status(ui->engine);
-    gui_profile_sync(ui);
+    /* A VM with nothing to boot is refused before anything is asked of the
+     * engine, so an empty path never reaches it as a question. */
     if (!mg_ui_start_allowed(ui->disk, ui->iso)) {
         gui_note(ui, tr("Bu VM'nin açılacak bir diski yok. Yeni bir disk oluşturun ya da bir kurulum/güvenlik diski seçin.",
                         "This VM has no disk to boot from. Create a new disk or choose an installation image."));
         return;
     }
+    gui_profile_sync(ui);
     if (ui->profile_missing && !ui->ram_dirty && !ui->bus_dirty) {
         gui_note(ui, tr("Bu diskin kayıtlı belleği ve disk yolu yok; mevcut bir disk sessizce yeniden bağlanmaz. Ayarlar'dan VM belleğini ve disk yolunu (bus) VM'in orijinal değerleriyle seçin.",
                         "This disk has no recorded memory or disk bus, and an existing disk is never reattached silently. In Settings set VM memory and disk bus to the VM's original values, then start again."));
@@ -673,7 +678,8 @@ static void gui_edit(MgGui *ui, int slot, char *field, size_t capacity)
     /* The shadow records what the field now holds, through the same write
      * the field itself used, so the two cannot end up holding different
      * text and the editor cannot write the previous one back. */
-    snprintf(ui->editor_shadow[slot], sizeof(ui->editor_shadow[slot]), "%s", field);
+    mg_ui_text_pair(field, capacity, ui->editor_shadow[slot],
+                    sizeof(ui->editor_shadow[slot]), field);
 }
 
 static int gui_utf8_chars(const char *text, int length)

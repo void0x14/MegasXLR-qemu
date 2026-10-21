@@ -72,8 +72,12 @@ void mg_ui_text_pair(char *field, size_t field_capacity,
                      char *shadow, size_t shadow_capacity,
                      const char *value)
 {
+    char copy[1024];
     if (!field || !field_capacity || !shadow || !shadow_capacity || !value) return;
-    snprintf(field, field_capacity, "%s", value);
+    /* The value may be the field itself, so it is copied before anything is
+     * written. */
+    snprintf(copy, sizeof(copy), "%s", value);
+    snprintf(field, field_capacity, "%s", copy);
     /* The editor holds what the field holds, including any truncation, so the
      * two can never hold different text. */
     snprintf(shadow, shadow_capacity, "%s", field);

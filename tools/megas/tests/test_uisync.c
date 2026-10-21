@@ -216,6 +216,20 @@ static void test_the_field_and_the_editor_copy_never_diverge(void)
     mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), "/b/c.qcow2");
     mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), "");
     assert(strcmp(field, shadow) == 0);
+    /* The value may be the field itself, which is how the editor writes its
+     * own text back. That must not read what it is writing. */
+    snprintf(field, sizeof(field), "%s", "/editor/wrote.this.qcow2");
+    mg_ui_text_pair(field, sizeof(field), shadow, sizeof(shadow), field);
+    assert(strcmp(field, "/editor/wrote.this.qcow2") == 0);
+    assert(strcmp(field, shadow) == 0);
+    /* A field smaller than the editor's copy is truncated into both. */
+    {
+        char small[16], large[512];
+        mg_ui_text_pair(small, sizeof(small), large, sizeof(large),
+                        "/a/very/long/path/that/does/not/fit");
+        assert(strlen(small) == sizeof(small) - 1);
+        assert(strcmp(small, large) == 0);
+    }
     puts("uisync: the field and the editor's copy of it never diverge");
 }
 
