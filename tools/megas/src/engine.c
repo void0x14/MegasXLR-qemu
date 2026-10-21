@@ -84,6 +84,9 @@ struct MgEngine {
     FILE *journal;
 
     char token[65], token_path[1024], qemu_log[1024];
+    char vm_disk[1024], vm_bus[16], vm_video[64];
+    unsigned vm_ram_mb;
+    int vm_profile_known;
 
     char qmp_buffer[LINE_CAP], qmp_reply[LINE_CAP];
 
@@ -750,11 +753,7 @@ if(ret<0||j->t[ret].type!='[')failed=1;
         if(inserted<0||j->t[inserted].type!='{')continue;
         node=jget(j,inserted,"node-name");
         drv=jget(j,inserted,"drv");
-        if(node>=0&&jeq(j,node,"megasdisk")){
-            /* explicit megasdisk */
-        } else if(matches==0&&drv>=0&&jeq(j,drv,"qcow2")){
-            /* primary qcow2 disk */
-        } else continue;
+        if(node<0||!jeq(j,node,"megasdisk"))continue;
         matches++;
         image=jget(j,inserted,"image");
         if(image>=0&&j->t[image].type=='{')image_for_catalog=image;
@@ -1241,7 +1240,7 @@ snprintf(cfg->runtime_dir,sizeof(cfg->runtime_dir),"%.900s/.local/state/megas",b
     }
     base=mgp_env("MEGAS_QEMU",env,sizeof(env))?NULL:env;
     mgp_real_qemu(base,cfg->qemu,sizeof(cfg->qemu));
-cfg->ram_mb=256;
+cfg->ram_mb=0; /* unknown until the caller or a recorded VM profile supplies it */
 cfg->width=1280;
 cfg->height=720;
 
@@ -1264,6 +1263,13 @@ FILE *token;
     e=calloc(1,sizeof(*e));
 if(!e)return NULL;
 e->cfg=*cfg;
+    /* The configured disk and its memory are this controller's own VM:
+     * record them so a later start never borrows another disk's memory. */
+    snprintf(e->vm_disk,sizeof(e->vm_disk),"%s",cfg->disk);
+e->vm_ram_mb=cfg->ram_mb;
+    snprintf(e->vm_bus,sizeof(e->vm_bus),"%s",cfg->disk_bus);
+snprintf(e->vm_video,sizeof(e->vm_video),"%s",cfg->video);
+e->vm_profile_known=cfg->ram_mb!=0;
 e->qmp=e->listener=MGP_BAD_SOCKET;
 e->owner_lock=-1;
 
@@ -1338,6 +1344,285 @@ return n;
 }
 static int config_string(Json *j,const char *key,char *target,size_t cap){int i=jget(j,0,key);
 return i<0?0:jstring(j,i,target,cap);
+}
+typedef struct {
+    unsigned ram_mb, width, height;
+    char disk[1024], bus[16], video[64];
+} VmProfile;
+
+static uint64_t profile_hash(const char *s) {
+    uint64_t h = 1469598103934665603ULL;
+    while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211ULL; }
+    return h;
+}
+static int profile_path(MgEngine *e, const char *disk, char *out, size_t cap) {
+    if (!disk[0]) return -1;
+    if (snprintf(out, cap, "%.900s/vm-%016llx.profile", e->cfg.runtime_dir,
+                 (unsigned long long)profile_hash(disk)) >= (int)cap) return -1;
+    return 0;
+}
+static int profile_load(MgEngine *e, const char *disk, VmProfile *p) {
+    char path[1024], text[4096];
+    FILE *file; size_t n; Json *j;
+    memset(p, 0, sizeof(*p));
+    if (profile_path(e, disk, path, sizeof(path))) return -1;
+    file = mgp_fopen(path, "rb"); if (!file) return -1;
+    n = fread(text, 1, sizeof(text) - 1, file); fclose(file); text[n] = 0;
+    j = malloc(sizeof(*j)); if (!j) return -1;
+    if (jparse(j, text) || j->n < 1 || j->t[0].type != '{') { free(j); return -1; }
+    p->ram_mb = number_or(j, "ram_mb", 0);
+    p->width = number_or(j, "width", 0);
+    p->height = number_or(j, "height", 0);
+    config_string(j, "disk", p->disk, sizeof(p->disk));
+    config_string(j, "bus", p->bus, sizeof(p->bus));
+    config_string(j, "video", p->video, sizeof(p->video));
+    free(j);
+    return p->ram_mb ? 0 : -1;
+}
+static int profile_save(MgEngine *e, const VmProfile *p) {
+    char path[1024], tmp[1100], text[2048];
+    FILE *file; Buffer b; int bad = 0;
+    if (!p->ram_mb || profile_path(e, p->disk, path, sizeof(path))) return -1;
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp)) return -1;
+    binit(&b, text, sizeof(text));
+    bput(&b, "{\"disk\":"); bstr(&b, p->disk);
+    bfmt(&b, ",\"ram_mb\":%u,\"width\":%u,\"height\":%u,\"bus\":",
+         p->ram_mb, p->width, p->height); bstr(&b, p->bus);
+    bput(&b, ",\"video\":"); bstr(&b, p->video); bput(&b, "}");
+    if (b.error) return -1;
+    file = mgp_fopen(tmp, "wb"); if (!file) return -1;
+    if (fwrite(text, 1, b.n, file) != b.n) bad = 1;
+    if (fflush(file)) bad = 1;
+    if (fclose(file)) bad = 1;
+    if (bad) { mgp_remove(tmp); return -1; }
+    if (mgp_replace(tmp, path)) { mgp_remove(tmp); return -1; }
+    return 0;
+}
+static unsigned parse_mem_mb(const char *value) {
+    unsigned long long n = 0;
+    const char *p = value;
+    int digits = 0;
+    if (!p) return 0;
+    if (!strncmp(p, "size=", 5)) p += 5;
+    while (isdigit((unsigned char)*p)) {
+        if (n > 100000000ULL) return 0;
+        n = n * 10 + (unsigned)(*p - '0');
+        p++; digits = 1;
+    }
+    if (!digits) return 0;
+    switch (tolower((unsigned char)*p)) {
+    case 'k': n = (n + 1023) / 1024; break;
+    case 'm': break;
+    case 'g': n *= 1024; break;
+    case 't': n *= 1024 * 1024; break;
+    default: break;
+    }
+    if (n < 1 || n > 32768) return 0;
+    return (unsigned)n;
+}
+static unsigned argv_ram_mb(char *const argv[], int n) {
+    int i;
+    for (i = 1; i < n; i++) {
+        unsigned value = 0;
+        if (!strcmp(argv[i], "-m") || !strcmp(argv[i], "--m")) {
+            if (i + 1 < n && (value = parse_mem_mb(argv[i + 1]))) return value;
+        } else if (!strncmp(argv[i], "-m=", 3) || !strncmp(argv[i], "--m=", 4)) {
+            const char *v = argv[i] + (argv[i][1] == '-' ? 4 : 3);
+            if ((value = parse_mem_mb(v))) return value;
+        }
+    }
+    return 0;
+}
+static void argv_vm_profile(char *const argv[], int n, VmProfile *p) {
+    int i;
+    for (i = 1; i < n; i++) {
+        const char *a = argv[i], *v = (i + 1 < n) ? argv[i + 1] : NULL;
+        if ((!strcmp(a, "-m") || !strcmp(a, "--m")) && v) {
+            unsigned m = parse_mem_mb(v);
+            if (m && !p->ram_mb) p->ram_mb = m;
+        } else if (!strcmp(a, "-drive") && v) {
+            const char *ifx = strstr(v, "if=");
+            if (ifx) {
+                ifx += 3;
+                if (!strncmp(ifx, "ide", 3)) snprintf(p->bus, sizeof(p->bus), "ide");
+                else if (!strncmp(ifx, "virtio", 6)) snprintf(p->bus, sizeof(p->bus), "virtio");
+                else if (!strncmp(ifx, "scsi", 4)) snprintf(p->bus, sizeof(p->bus), "scsi");
+            }
+        } else if (!strcmp(a, "-device") && v) {
+            if (!strncmp(v, "ide-", 4)) snprintf(p->bus, sizeof(p->bus), "ide");
+            else if (!strncmp(v, "virtio-blk", 10)) snprintf(p->bus, sizeof(p->bus), "virtio");
+            else if (!strncmp(v, "scsi-hd", 7)) snprintf(p->bus, sizeof(p->bus), "scsi");
+            else if (!strncmp(v, "nvme", 4)) snprintf(p->bus, sizeof(p->bus), "nvme");
+            if (!p->video[0]) {
+                if (!strncmp(v, "virtio-vga", 10)) snprintf(p->video, sizeof(p->video), "virtio-vga");
+                else if (!strncmp(v, "vmware-svga", 11)) snprintf(p->video, sizeof(p->video), "vmware-svga");
+                else if (!strncmp(v, "bochs-display", 13)) snprintf(p->video, sizeof(p->video), "bochs-display");
+                else if (!strncmp(v, "qxl", 3)) snprintf(p->video, sizeof(p->video), "qxl");
+                else if (!strncmp(v, "cirrus", 6)) snprintf(p->video, sizeof(p->video), "cirrus");
+                else if (!strncmp(v, "VGA", 3)) snprintf(p->video, sizeof(p->video), "VGA");
+            }
+        } else if (!strcmp(a, "-vga") && v && !p->video[0]) {
+            if (!strcmp(v, "std")) snprintf(p->video, sizeof(p->video), "VGA");
+            else if (!strcmp(v, "virtio")) snprintf(p->video, sizeof(p->video), "virtio-vga");
+            else if (!strcmp(v, "qxl")) snprintf(p->video, sizeof(p->video), "qxl");
+            else if (!strcmp(v, "cirrus")) snprintf(p->video, sizeof(p->video), "cirrus");
+        }
+    }
+}
+static int video_arg(char *out, size_t cap, const char *name, unsigned width, unsigned height) {
+    int n;
+    if (!name || !name[0]) name = "VGA";
+    n = snprintf(out, cap, "%s", name);
+    if (n < 0 || (size_t)n >= cap) return -1;
+    if (strchr(name, ',')) return 0;
+    if (strcmp(name, "VGA") && strcmp(name, "virtio-vga") && strcmp(name, "bochs-display")) return 0;
+    n += snprintf(out + n, cap - (size_t)n, ",edid=on,xres=%u,yres=%u", width, height);
+    return (n < 0 || (size_t)n >= cap) ? -1 : 0;
+}
+/* A start request may carry a raw QEMU command line instead of managed
+ * fields. Its argv array is parsed once into caller-owned pointers; every
+ * caller runs on the owner thread, so the static buffer is safe. */
+static int raw_argv_json(Json *j, char *argv[], int maximum) {
+    static char arg_buf[65536];
+    int token = jget(j, 0, "raw_argv"), count = 0, k;
+    size_t used = 0;
+    if (token < 0) token = jget(j, 0, "args");
+    if (token < 0 || j->t[token].type != '[') return 0;
+    for (k = token + 1; k < j->n && count < maximum; k++) {
+        if (j->t[k].parent != token || j->t[k].type != 's') continue;
+        if (used + 4096 >= sizeof(arg_buf)) break;
+        if (!jstring(j, k, arg_buf + used, sizeof(arg_buf) - used)) {
+            argv[count++] = arg_buf + used;
+            used += strlen(arg_buf + used) + 1;
+        }
+    }
+    return count;
+}
+/* First disk image named by an intercepted command line. */
+static void argv_disk(char *out, size_t cap, char *const argv[], int n) {
+    int i;
+    for (i = 1; i < n; i++) {
+        const char *found = strstr(argv[i], "file=");
+        if (found) {
+            size_t len = strcspn(found + 5, ",");
+            if (len >= cap) len = cap - 1;
+            memcpy(out, found + 5, len);
+            out[len] = 0;
+            return;
+        }
+        if ((!strcmp(argv[i], "-hda") || !strcmp(argv[i], "-drive")) && i + 1 < n && argv[i + 1][0] != '-') {
+            snprintf(out, cap, "%s", argv[i + 1]);
+            return;
+        }
+    }
+}
+/* Effective RAM, disk bus, video device and disk path of a start request.
+ * Values come from the request, from the intercepted raw command line, or
+ * from the profile recorded for that exact disk. Nothing is invented: an
+ * unresolvable value returns -1 with the reason the caller must show, so a
+ * caller that must ask the user (the agent) is stopped instead of guessing. */
+static int resolve_start(MgEngine *e, Json *j, VmProfile *p, char *reason, size_t reason_cap) {
+    VmProfile recorded;
+    int have_recorded, same_vm, explicit_ram, explicit_bus;
+    memset(p, 0, sizeof(*p));
+    {
+        char *argv[512];
+        int n = raw_argv_json(j, argv, 511);
+        if (n > 0) {
+            unsigned actual;
+            argv_vm_profile(argv, n, p);
+            actual = argv_ram_mb(argv, n);
+            /* QEMU's own default when the intercepted command line omits -m:
+             * that is what the guest really gets, not a controller guess. */
+            p->ram_mb = actual ? actual : 128;
+            p->disk[0] = 0;
+            argv_disk(p->disk, sizeof(p->disk), argv, n);
+            if (!p->width) p->width = e->cfg.width;
+            if (!p->height) p->height = e->cfg.height;
+            return 0;
+        }
+    }
+    snprintf(p->disk, sizeof(p->disk), "%s", e->cfg.disk);
+    if (config_string(j, "disk", p->disk, sizeof(p->disk))) {
+        snprintf(reason, reason_cap, "Disk path is too long.");
+        return -1;
+    }
+    explicit_ram = jget(j, 0, "ram_mb") >= 0;
+    explicit_bus = jget(j, 0, "bus") >= 0 || jget(j, 0, "disk_bus") >= 0;
+    same_vm = !strcmp(p->disk, e->vm_disk);
+    have_recorded = profile_load(e, p->disk, &recorded) == 0;
+    if (explicit_ram) {
+        p->ram_mb = number_or(j, "ram_mb", 0);
+        if (p->ram_mb < 16 || p->ram_mb > 32768) {
+            snprintf(reason, reason_cap, "Choose ram_mb between 16 and 32768 MB; it is the VM's own memory.");
+            return -1;
+        }
+    } else if (have_recorded && recorded.ram_mb) {
+        p->ram_mb = recorded.ram_mb;
+    } else if (same_vm) {
+        p->ram_mb = e->vm_ram_mb; /* same VM this controller already runs */
+    } else {
+        p->ram_mb = 0;
+    }
+    if (!p->ram_mb) {
+        snprintf(reason, reason_cap,
+            "VM memory is not established%s. Run preflight, ask the user for ram_mb equal to that VM's existing memory, then start with it. The controller never guesses memory and never reuses another disk's memory.",
+            p->disk[0] ? " for this disk" : " for a VM without a disk");
+        return -1;
+    }
+    if (explicit_bus) {
+        if (config_string(j, "bus", p->bus, sizeof(p->bus)) && config_string(j, "disk_bus", p->bus, sizeof(p->bus))) {
+            snprintf(reason, reason_cap, "Disk bus is too long.");
+            return -1;
+        }
+        if (strcmp(p->bus, "ide") && strcmp(p->bus, "virtio") && strcmp(p->bus, "scsi") && strcmp(p->bus, "nvme")) {
+            snprintf(reason, reason_cap, "Choose bus ide, virtio, scsi or nvme; the disk controller is never changed silently.");
+            return -1;
+        }
+    } else if (have_recorded && recorded.bus[0]) {
+        snprintf(p->bus, sizeof(p->bus), "%s", recorded.bus);
+    } else if (same_vm && e->vm_bus[0]) {
+        snprintf(p->bus, sizeof(p->bus), "%s", e->vm_bus);
+    } else if (p->disk[0]) {
+        snprintf(reason, reason_cap,
+            "Disk bus is not established for this disk. Run preflight, ask the user for bus (ide, virtio, scsi or nvme) matching the disk's existing controller, then start with it. An existing disk is never reattached silently.");
+        return -1;
+    } else {
+        snprintf(p->bus, sizeof(p->bus), "%s", e->cfg.disk_bus[0] ? e->cfg.disk_bus : "virtio");
+    }
+    if (config_string(j, "video", p->video, sizeof(p->video))) {
+        snprintf(reason, reason_cap, "Video device name is too long.");
+        return -1;
+    }
+    if (!p->video[0]) {
+        if (have_recorded && recorded.video[0]) snprintf(p->video, sizeof(p->video), "%s", recorded.video);
+        else if (same_vm && e->vm_video[0]) snprintf(p->video, sizeof(p->video), "%s", e->vm_video);
+        else snprintf(p->video, sizeof(p->video), "%s", e->cfg.video[0] ? e->cfg.video : "VGA");
+    }
+    p->width = jget(j, 0, "width") >= 0 ? number_or(j, "width", 0)
+                                         : (have_recorded && recorded.width) ? recorded.width : e->cfg.width;
+    p->height = jget(j, 0, "height") >= 0 ? number_or(j, "height", 0)
+                                          : (have_recorded && recorded.height) ? recorded.height : e->cfg.height;
+    return 0;
+}
+/* The audit record of a start carries the configuration that governs it, so
+ * a journal reader never has to guess the memory the VM really received. */
+static void start_effective_text(MgEngine *e, Json *j, char *out, size_t cap) {
+    VmProfile p; char reason[512]; Buffer b;
+    out[0] = 0;
+    binit(&b, out, cap);
+    if (resolve_start(e, j, &p, reason, sizeof(reason))) {
+        bput(&b, ",\"effective_ram_mb\":0,\"preflight\":\"required\",\"unresolved\":");
+        bstr(&b, reason);
+    } else {
+        bfmt(&b, ",\"effective_ram_mb\":%u,\"effective_bus\":", p.ram_mb);
+        bstr(&b, p.bus);
+        bput(&b, ",\"effective_video\":");
+        bstr(&b, p.video);
+        bput(&b, ",\"effective_disk\":");
+        bstr(&b, p.disk);
+    }
+    if (b.error) out[0] = 0;
 }
 static int parent_path(char *path)
 {
@@ -1709,6 +1994,8 @@ static void ocr_tick(MgEngine *e)
 }
 static int vm_start(MgEngine *e,Json *j) {
     char qmp[128],vnc[128],qga[160],memory[32],video[128],disk[4096],cdrom[4096],seed_file[4096],seed_raw[512],seed_path[1024],username[33],password[257]="",bios[1024],error[512],data_dir[1024],helpers[1024];
+    VmProfile profile;
+    char unresolved[512];
 
     char *argv[512];
 int n=0;
@@ -1717,6 +2004,8 @@ Buffer b;
 char checkpoint_status[192]="";
 int login_enabled=e->cfg.passwordless;
 #define VM_START_FAIL() do { wipe_memory(password,sizeof(password)); return -1; } while (0)
+
+    memset(&profile, 0, sizeof(profile));
 
     if(e->status.owned_pid&&mgp_alive(&e->process)){
         if(e->status.connected){feedback(e,"VM is already running; its current state is returned.");return 0;}
@@ -1793,21 +2082,6 @@ int login_enabled=e->cfg.passwordless;
                     if (strstr(raw_args[i], ".qcow2")) {
                         e->snapshot_supported = 1;
                     }
-                    if (!e->cfg.disk[0]) {
-                        if (strstr(raw_args[i], "file=")) {
-                            const char *f = strstr(raw_args[i], "file=") + 5;
-                            const char *comma = strchr(f, ',');
-                            size_t flen = comma ? (size_t)(comma - f) : strlen(f);
-                            if (flen < sizeof(e->cfg.disk)) {
-                                memcpy(e->cfg.disk, f, flen);
-                                e->cfg.disk[flen] = 0;
-                            }
-                        } else if ((!strcmp(raw_args[i], "-hda") || !strcmp(raw_args[i], "-drive")) && i + 1 < raw_count) {
-                            if (raw_args[i + 1][0] != '-') {
-                                snprintf(e->cfg.disk, sizeof(e->cfg.disk), "%s", raw_args[i + 1]);
-                            }
-                        }
-                    }
                     argv[n++] = raw_args[i++];
                 }
                 argv[n++] = "-display";
@@ -1823,6 +2097,28 @@ int login_enabled=e->cfg.passwordless;
                     argv[n++] = "/usr/share/qemu";
                 }
                 argv[n] = NULL;
+                {
+                    unsigned actual_ram = argv_ram_mb(argv, n);
+                    argv_vm_profile(argv, n, &profile);
+                    /* The intercepted command line owns this VM: its disk,
+                     * memory and controller replace anything remembered. A
+                     * value the command line does not state stays unknown
+                     * instead of inheriting the previous VM's setting. */
+                    e->cfg.disk[0] = 0;
+                    e->cfg.disk_bus[0] = 0;
+                    e->cfg.video[0] = 0;
+                    argv_disk(e->cfg.disk, sizeof(e->cfg.disk), argv, n);
+                    e->cfg.ram_mb = actual_ram ? actual_ram : 128;
+                    if (profile.bus[0]) snprintf(e->cfg.disk_bus, sizeof(e->cfg.disk_bus), "%s", profile.bus);
+                    if (profile.video[0]) snprintf(e->cfg.video, sizeof(e->cfg.video), "%s", profile.video);
+                    profile.ram_mb = e->cfg.ram_mb;
+                    profile.width = e->cfg.width;
+                    profile.height = e->cfg.height;
+                    snprintf(profile.disk, sizeof(profile.disk), "%s", e->cfg.disk);
+                    snprintf(profile.bus, sizeof(profile.bus), "%s", e->cfg.disk_bus);
+                    snprintf(profile.video, sizeof(profile.video), "%s", e->cfg.video);
+                    e->vm_profile_known = 1;
+                }
                 goto spawn_vm;
             }
         }
@@ -1845,9 +2141,16 @@ VM_START_FAIL();
     if(login_enabled&&password[0]){feedback(e,"Omit password when enabling passwordless sign-in; no guest command was sent.");wipe_memory(password,sizeof(password));return -1;}
     if(!login_enabled&&!password[0]){feedback(e,"A new managed guest starts with a locked account. Choose passwordless sign-in or provide a password before starting.");wipe_memory(password,sizeof(password));return -1;}
     e->cfg.passwordless=login_enabled;
-    e->cfg.ram_mb=number_or(j,"ram_mb",e->cfg.ram_mb);
-e->cfg.width=number_or(j,"width",e->cfg.width);
-e->cfg.height=number_or(j,"height",e->cfg.height);
+    if (resolve_start(e, j, &profile, unresolved, sizeof(unresolved))) {
+        journal(e, "preflight_required", unresolved);
+        feedback(e, "%s", unresolved);
+        VM_START_FAIL();
+    }
+    e->cfg.ram_mb = profile.ram_mb;
+    snprintf(e->cfg.disk_bus, sizeof(e->cfg.disk_bus), "%s", profile.bus);
+    snprintf(e->cfg.video, sizeof(e->cfg.video), "%s", profile.video);
+    e->cfg.width = profile.width;
+    e->cfg.height = profile.height;
 
     if(e->cfg.ram_mb<16||e->cfg.ram_mb>32768||e->cfg.width<320||e->cfg.height<200||e->cfg.width>4096||e->cfg.height>4096||(uint64_t)e->cfg.width*e->cfg.height>9437184){feedback(e,"Choose RAM 16-32768 MB and a screen between 320x200 and 9 million pixels.");
 VM_START_FAIL();
@@ -1861,7 +2164,9 @@ snprintf(vnc,sizeof(vnc),"127.0.0.1:%u",e->cfg.vnc_port-5900);
     snprintf(qga,sizeof(qga),"socket,id=megas-qga,host=127.0.0.1,port=%u,server=on,wait=off",e->cfg.qga_port);
 
     snprintf(memory,sizeof(memory),"%u",e->cfg.ram_mb);
-    snprintf(video,sizeof(video),"VGA,edid=on,xres=%u,yres=%u",e->cfg.width,e->cfg.height);
+    if (video_arg(video, sizeof(video), e->cfg.video, e->cfg.width, e->cfg.height)) {
+        feedback(e, "Video device settings exceed the supported size."); VM_START_FAIL();
+    }
 
     argv[n++]=e->cfg.qemu;
 argv[n++]="-m";
@@ -1904,9 +2209,16 @@ VM_START_FAIL();
 }
         argv[n++]="-blockdev";
 argv[n++]=disk;
-argv[n++]="-device";
-argv[n++]="virtio-blk-pci,drive=megasdisk";
-
+        if (!strcmp(e->cfg.disk_bus, "ide")) {
+            argv[n++]="-device"; argv[n++]="ide-hd,drive=megasdisk";
+        } else if (!strcmp(e->cfg.disk_bus, "scsi")) {
+            argv[n++]="-device"; argv[n++]="virtio-scsi-pci,id=megasscsi";
+            argv[n++]="-device"; argv[n++]="scsi-hd,drive=megasdisk,bus=megasscsi.0";
+        } else if (!strcmp(e->cfg.disk_bus, "nvme")) {
+            argv[n++]="-device"; argv[n++]="nvme,serial=megasdisk,drive=megasdisk";
+        } else {
+            argv[n++]="-device"; argv[n++]="virtio-blk-pci,drive=megasdisk";
+        }
     }else e->snapshot_supported=0;
 
     if(e->cfg.iso[0]){size_t i,used=0;
@@ -1961,6 +2273,20 @@ argv[n++]=data_dir;
     }
     argv[n]=NULL;
 spawn_vm:
+    snprintf(e->vm_disk, sizeof(e->vm_disk), "%s", e->cfg.disk);
+    e->vm_ram_mb = e->cfg.ram_mb;
+    snprintf(e->vm_bus, sizeof(e->vm_bus), "%s", e->cfg.disk_bus);
+    snprintf(e->vm_video, sizeof(e->vm_video), "%s", e->cfg.video);
+    e->vm_profile_known = e->vm_ram_mb > 0;
+    {
+        char meta[2048];
+        Buffer mb;
+        binit(&mb, meta, sizeof(meta));
+        bput(&mb, "{\"disk\":"); bstr(&mb, e->vm_disk);
+        bfmt(&mb, ",\"ram_mb\":%u,\"bus\":", e->vm_ram_mb); bstr(&mb, e->vm_bus);
+        bput(&mb, ",\"video\":"); bstr(&mb, e->vm_video); bput(&mb, "}");
+        if (!mb.error) journal(e, "vm_profile", meta);
+    }
     e->disk_base=0;
     e->disk_base_known=0;
     e->snapshot_count=0;
@@ -1979,6 +2305,18 @@ if(journal(e,"process_spawn",command))VM_START_FAIL();
     if(mgp_spawn(&e->process,argv,e->qemu_log,error,sizeof(error))){feedback(e,"%s",error);
 VM_START_FAIL();
 }
+    if (e->cfg.disk[0] && e->cfg.ram_mb) {
+        VmProfile stored;
+        memset(&stored, 0, sizeof(stored));
+        stored.ram_mb = e->cfg.ram_mb;
+        stored.width = e->cfg.width;
+        stored.height = e->cfg.height;
+        snprintf(stored.disk, sizeof(stored.disk), "%s", e->cfg.disk);
+        snprintf(stored.bus, sizeof(stored.bus), "%s", e->cfg.disk_bus);
+        snprintf(stored.video, sizeof(stored.video), "%s", e->cfg.video);
+        if (profile_save(e, &stored)) journal(e, "vm_profile_save_failed",
+            "The effective VM configuration was not persisted; later starts must state RAM and bus explicitly.");
+    }
     e->status.owned_pid=mgp_pid(&e->process);
 strcpy(e->status.phase,"starting");
 
@@ -2184,7 +2522,15 @@ bstr(&b,e->status.phase);
     bstr(&b,e->guest_kind);
     bfmt(&b,",\"guest_pid\":%llu,\"automatic_pending\":%s,\"progress\":",(unsigned long long)e->guest_pid,e->guest_auto_pending?"true":"false");
     bstr(&b,e->guest_progress);
-    bput(&b,"}},\"ocr\":{\"status\":");
+    /* close guest_job and state so vm stays a sibling of state */
+    bput(&b,"}},\"vm\":{\"disk\":");
+    bstr(&b,e->vm_disk);
+    bfmt(&b,",\"memory_mb\":%u,\"bus\":",e->vm_ram_mb);
+    bstr(&b,e->vm_bus);
+    bput(&b,",\"video\":");bstr(&b,e->vm_video);
+    bfmt(&b,",\"profile_known\":%s,\"image_exists\":%s},\"ocr\":{\"status\":",
+        e->vm_profile_known?"true":"false",
+        (e->vm_disk[0]&&mgp_file_size(e->vm_disk))?"true":"false");
     bstr(&b,ocr_status_name(ocr_status));
     bfmt(&b,",\"generation\":%llu,\"pid\":%llu,\"peak_memory_bytes\":%llu,\"text\":",
          (unsigned long long)e->ocr_generation,(unsigned long long)e->ocr_pid,
@@ -2644,12 +2990,20 @@ static void json_safe_value(Json *j, int token, Buffer *b)
         b->n+=(size_t)length;b->s[b->n]=0;
     }
 }
-static int request_log(MgEngine *e,Json *j) {
-    char sanitized[REQUEST_CAP];
+static int request_log(MgEngine *e,Json *j,const char *action) {
+    char sanitized[REQUEST_CAP],effective[2048];
 Buffer b;
 
     binit(&b,sanitized,sizeof(sanitized));
 json_safe_value(j,0,&b);
+    if(!b.error&&action&&!strcmp(action,"start")){
+        start_effective_text(e,j,effective,sizeof(effective));
+        if(effective[0]&&strlen(effective)<sizeof(sanitized)-b.n-1){
+            memcpy(sanitized+b.n,effective,strlen(effective));
+b.n+=strlen(effective);
+sanitized[b.n]=0;
+        }
+    }
 return b.error?-1:journal(e,"action_request",sanitized);
 
 }
@@ -2701,15 +3055,42 @@ memset(h,0,sizeof(*h));
 h->step=e->status.actions;
 snprintf(h->action,sizeof(h->action),"%.31s",action);
 
-    if(request_log(e,j)&&strcmp(action,"status")&&strcmp(action,"steps")&&strcmp(action,"repair")&&strcmp(action,"stop")){feedback(e,"Forensic journal cannot accept more data. No mutation ran; preserve/export the journal and repair its storage.");
+    if(request_log(e,j,action)&&strcmp(action,"status")&&strcmp(action,"steps")&&strcmp(action,"repair")&&strcmp(action,"stop")){feedback(e,"Forensic journal cannot accept more data. No mutation ran; preserve/export the journal and repair its storage.");
 goto done;
 }
-    mutating=strcmp(action,"status")&&strcmp(action,"steps")&&strcmp(action,"repair")&&strcmp(action,"screenshot")&&strcmp(action,"stop")&&strcmp(action,"ocr");
+    mutating=strcmp(action,"preflight")&&strcmp(action,"status")&&strcmp(action,"steps")&&strcmp(action,"repair")&&strcmp(action,"screenshot")&&strcmp(action,"stop")&&strcmp(action,"ocr");
 
     if(mutating&&(e->job_active||e->late_id||
        (e->guest_active&&(!e->guest_auto_running||e->guest.uncertain)))){feedback(e,"Previous operation is still unconfirmed. New mutations are held while live state remains visible.");
 goto done;
 }
+    if(!strcmp(action,"preflight")){
+        char disk[1024]="";
+        VmProfile p;
+        int known, running;
+        uint64_t size;
+        if(config_string(j,"disk",disk,sizeof(disk))){feedback(e,"Disk path is too long.");ok=-1;goto done;}
+        if(!disk[0])snprintf(disk,sizeof(disk),"%s",e->cfg.disk);
+        known=profile_load(e,disk,&p)==0;
+        size=mgp_file_size(disk);
+        running=e->status.owned_pid&&mgp_alive(&e->process);
+        journal(e,"preflight",disk);
+        if(known)feedback(e,"Recorded profile for %s: ram_mb=%u, bus=%s, video=%s. Start reuses these exact values; change RAM or bus only when the user asks or the task needs more memory.%s",
+            disk,p.ram_mb,p.bus,p.video,size?"":" The disk image itself was not found on this computer.");
+        else if(disk[0]&&size)feedback(e,"No recorded profile for %s, but its disk image exists: this VM's memory and disk bus are unknown and start will refuse. Ask the user for ram_mb (the VM's existing memory) and bus (ide, virtio, scsi or nvme), then start with those values. No default is applied.",disk);
+        else feedback(e,"No recorded profile for %s and no disk image yet: this is a new VM. Ask the user for ram_mb (MiB) and bus (ide, virtio, scsi or nvme), or state them in the start request; the controller applies no default.",disk[0]?disk:"the empty disk path");
+        /* A running VM keeps its own identity in status; only a stopped
+         * controller adopts the queried profile as its current VM. */
+        if(!running||!strcmp(disk,e->vm_disk)){
+            snprintf(e->vm_disk,sizeof(e->vm_disk),"%s",disk);
+            e->vm_ram_mb=known?p.ram_mb:0;
+            snprintf(e->vm_bus,sizeof(e->vm_bus),"%s",known?p.bus:"");
+            snprintf(e->vm_video,sizeof(e->vm_video),"%s",known?p.video:"");
+            e->vm_profile_known=known;
+        }
+        ok=known?0:-1;
+        goto done;
+    }
     if(!strcmp(action,"status")||!strcmp(action,"steps")||!strcmp(action,"repair")){ok=0;
 goto done;
 }

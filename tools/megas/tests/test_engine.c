@@ -206,7 +206,7 @@ static void budget_start(BudgetFixture *fixture,const char *mode,unsigned ram_mb
     snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
     assert(strlen(fixture->runtime)+sizeof("/disk.qcow2")<=sizeof(cfg.disk));
     strcpy(cfg.disk,fixture->runtime);strcat(cfg.disk,"/disk.qcow2");
-    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.ram_mb=ram_mb;cfg.width=800;cfg.height=600;test_port+=10;
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.ram_mb=ram_mb;snprintf(cfg.disk_bus,sizeof(cfg.disk_bus),"virtio");cfg.width=800;cfg.height=600;test_port+=10;
     file=fopen(cfg.disk,"wb");assert(file);fputs("fake qcow2 fixture",file);fclose(file);
     file=fopen(fixture->catalog,"wb");assert(file);fclose(file);
     assert(!setenv("MEGAS_TEST_QMP_MODE",mode,1));assert(!setenv("MEGAS_TEST_QMP_CONTROL",fixture->control,1));assert(!setenv("MEGAS_TEST_QMP_TRACE",fixture->trace,1));assert(!setenv("MEGAS_TEST_QMP_CATALOG",fixture->catalog,1));unsetenv("MEGAS_TEST_QMP_CATALOG_MODE");
@@ -231,7 +231,7 @@ static void budget_reowner_start(BudgetFixture *fixture,const char *mode,unsigne
     snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
     assert(strlen(fixture->runtime)+sizeof("/disk.qcow2")<=sizeof(cfg.disk));
     strcpy(cfg.disk,fixture->runtime);strcat(cfg.disk,"/disk.qcow2");
-    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.ram_mb=ram_mb;cfg.width=800;cfg.height=600;test_port+=10;
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.ram_mb=ram_mb;snprintf(cfg.disk_bus,sizeof(cfg.disk_bus),"virtio");cfg.width=800;cfg.height=600;test_port+=10;
     assert(!setenv("MEGAS_TEST_QMP_MODE",mode,1));
     assert(!setenv("MEGAS_TEST_QMP_CATALOG",fixture->catalog,1));
     fixture->engine=mg_engine_new(&cfg);assert(fixture->engine);
@@ -252,6 +252,104 @@ static unsigned occurrences(const char *text,const char *needle) {
     unsigned count=0;size_t n=strlen(needle);const char *p=text;
     while((p=strstr(p,needle))!=NULL){count++;p+=n;}
     return count;
+}
+static const char *within(const char *text,const char *first,const char *second,size_t window) {
+    const char *p=strstr(text,first),*q;
+    if(!p)return NULL;
+    q=strstr(p,second);
+    return q&&(size_t)(q-p)<window?q:NULL;
+}
+static void test_vm_profile_reuse(void) {
+    MgConfig cfg;MgEngine *engine;char runtime[]="/tmp/megas-profile-XXXXXX",response[65536],request[2048],journal[65536];
+    char control[1024],trace[1024],catalog[1024];FILE *file;int n;
+    assert(mkdtemp(runtime));
+    snprintf(control,sizeof(control),"%s/qmp-control",runtime);
+    snprintf(trace,sizeof(trace),"%s/qmp-trace",runtime);
+    snprintf(catalog,sizeof(catalog),"%s/qmp-catalog",runtime);
+    file=fopen(control,"wb");assert(file);fclose(file);
+    file=fopen(catalog,"wb");assert(file);fclose(file);
+    assert(!setenv("MEGAS_TEST_QMP_MODE","normal",1));
+    assert(!setenv("MEGAS_TEST_QMP_CONTROL",control,1));
+    assert(!setenv("MEGAS_TEST_QMP_TRACE",trace,1));
+    assert(!setenv("MEGAS_TEST_QMP_CATALOG",catalog,1));
+
+    mg_config_defaults(&cfg);assert(cfg.ram_mb==0);assert(cfg.disk_bus[0]==0);
+    snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
+    snprintf(cfg.disk,sizeof(cfg.disk),"%s/disk.qcow2",runtime);
+    file=fopen(cfg.disk,"wb");assert(file);fputs("fake qcow2 fixture",file);fclose(file);
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.width=800;cfg.height=600;test_port+=10;
+    engine=mg_engine_new(&cfg);assert(engine);
+
+    n=snprintf(request,sizeof(request),"{\"action\":\"preflight\",\"disk\":\"%s\"}",cfg.disk);
+    assert(n>0&&(size_t)n<sizeof(request));
+    assert(mg_engine_submit(engine,request,response,sizeof(response)));
+    assert(strstr(response,"No recorded profile"));
+    /* preflight asks for the values it cannot know instead of inventing them */
+    assert(strstr(response,"Ask the user for ram_mb"));
+    assert(strstr(response,"\"image_exists\":true"));
+    assert(strstr(response,"\"profile_known\":false"));
+    assert(mg_engine_submit(engine,"{\"action\":\"start\"}",response,sizeof(response)));
+    assert(strstr(response,"VM memory is not established"));
+
+    n=snprintf(request,sizeof(request),"{\"action\":\"start\",\"ram_mb\":4096,\"bus\":\"ide\"}");
+    assert(n>0&&(size_t)n<sizeof(request));
+    assert(!mg_engine_submit(engine,request,response,sizeof(response)));
+    assert(strstr(response,"\"connected\":true"));
+    assert(strstr(response,"\"memory_mb\":4096"));
+    assert(strstr(response,"\"bus\":\"ide\""));
+    assert(strstr(response,"\"image_exists\":true"));
+    assert(!mg_engine_submit(engine,"{\"action\":\"stop\"}",response,sizeof(response)));
+    /* another disk never inherits this VM's memory or controller */
+    n=snprintf(request,sizeof(request),"%s/other.qcow2",runtime);
+    assert(n>0&&(size_t)n<sizeof(request));
+    file=fopen(request,"wb");assert(file);fputs("another fake qcow2",file);fclose(file);
+    n=snprintf(request,sizeof(request),"{\"action\":\"start\",\"disk\":\"%s/other.qcow2\"}",runtime);
+    assert(n>0&&(size_t)n<sizeof(request));
+    assert(mg_engine_submit(engine,request,response,sizeof(response)));
+    assert(strstr(response,"VM memory is not established"));
+    assert(strstr(response,"never reuses another disk's memory"));
+    /* restarting the same disk keeps its recorded memory */
+    n=snprintf(request,sizeof(request),"{\"action\":\"start\",\"disk\":\"%s\"}",cfg.disk);
+    assert(n>0&&(size_t)n<sizeof(request));
+    assert(!mg_engine_submit(engine,request,response,sizeof(response)));
+    assert(strstr(response,"\"memory_mb\":4096"));
+    assert(strstr(response,"\"bus\":\"ide\""));
+    assert(!mg_engine_submit(engine,"{\"action\":\"stop\"}",response,sizeof(response)));
+    mg_engine_free(engine);
+
+    mg_config_defaults(&cfg);assert(cfg.ram_mb==0);assert(cfg.disk_bus[0]==0);
+    snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",test_program);
+    snprintf(cfg.disk,sizeof(cfg.disk),"%s/disk.qcow2",runtime);
+    cfg.control_port=test_port;cfg.qmp_port=test_port+1;cfg.vnc_port=test_port+2;cfg.width=800;cfg.height=600;test_port+=10;
+    engine=mg_engine_new(&cfg);assert(engine);
+    assert(!mg_engine_submit(engine,"{\"action\":\"start\"}",response,sizeof(response)));
+    assert(strstr(response,"\"connected\":true"));
+    assert(strstr(response,"\"memory_mb\":4096"));assert(!strstr(response,"\"memory_mb\":256"));
+    assert(strstr(response,"\"bus\":\"ide\""));
+    assert(!mg_engine_submit(engine,"{\"action\":\"stop\"}",response,sizeof(response)));
+    mg_engine_free(engine);
+
+    snprintf(request,sizeof(request),"{\"action\":\"preflight\",\"disk\":\"%s/disk.qcow2\"}",runtime);
+    mg_config_defaults(&cfg);snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);
+    engine=mg_engine_new(&cfg);assert(engine);
+    assert(!mg_engine_submit(engine,request,response,sizeof(response)));
+    assert(strstr(response,"4096"));assert(strstr(response,"ide"));
+    mg_engine_free(engine);
+
+    snprintf(request,sizeof(request),"%s/actions.jsonl",runtime);
+    read_text_file(request,journal,sizeof(journal));
+    assert(strstr(journal,"ram_mb\\\":4096"));
+    assert(strstr(journal,"ide-hd,drive=megasdisk"));
+    /* the audit record of the start itself states the memory it applied */
+    assert(within(journal,"\\\"action\\\":\\\"start\\\",\\\"ram_mb\\\":4096","\\\"effective_ram_mb\\\":4096",4096));
+    assert(within(journal,"\\\"action\\\":\\\"start\\\",\\\"ram_mb\\\":4096","\\\"effective_bus\\\":\\\"ide\\\"",4096));
+    /* a refused start records why preflight must answer first */
+    assert(within(journal,"\\\"action\\\":\\\"start\\\"","preflight_required",8192));
+    assert(strstr(journal,"\"type\":\"preflight\""));
+    unsetenv("MEGAS_TEST_QMP_MODE");unsetenv("MEGAS_TEST_QMP_CONTROL");unsetenv("MEGAS_TEST_QMP_TRACE");unsetenv("MEGAS_TEST_QMP_CATALOG");
+    puts("engine: unknown VM profile fails closed; explicit RAM/bus is journaled and reused instead of a 256 MB default");
 }
 static void test_checkpoint_node_selection(void) {
     BudgetFixture fixture;char response[65536],trace[65536];
@@ -435,7 +533,7 @@ int main(int argc,char **argv) {
     if(argv[0][0]=='/')snprintf(self,sizeof(self),"%s",argv[0]);else snprintf(self,sizeof(self),"%.700s/%.300s",cwd,argv[0]);
     snprintf(test_program,sizeof(test_program),"%s",self);
     mg_config_defaults(&cfg);snprintf(cfg.runtime_dir,sizeof(cfg.runtime_dir),"%s",runtime);snprintf(cfg.qemu,sizeof(cfg.qemu),"%s",self);
-    cfg.control_port=52601;cfg.qmp_port=52602;cfg.vnc_port=52603;cfg.ram_mb=16;cfg.width=800;cfg.height=600;
+    cfg.control_port=52601;cfg.qmp_port=52602;cfg.vnc_port=52603;cfg.ram_mb=16;snprintf(cfg.disk_bus,sizeof(cfg.disk_bus),"virtio");cfg.width=800;cfg.height=600;
     snprintf(cfg.disk,sizeof(cfg.disk),"%s/disk.qcow2",runtime);file=fopen(cfg.disk,"wb");assert(file);fputs("fixture",file);fclose(file);
     e=mg_engine_new(&cfg);assert(e);
     assert(!mg_engine_submit(e,"{\"action\":\"start\"}",response,sizeof(response)));assert(strstr(response,"\"connected\":true"));assert(strstr(response,"\"image_path\":\"\""));
@@ -464,5 +562,6 @@ int main(int argc,char **argv) {
     test_checkpoint_catalog_reowner();test_checkpoint_catalog_automatic_name_collision();
     test_checkpoint_catalog_foreign_never_auto_gc();test_checkpoint_catalog_full_foreign_fails_closed();
     test_checkpoint_catalog_unavailable_keeps_vm();test_checkpoint_catalog_over_limit_keeps_vm();
+    test_vm_profile_reuse();
     return 0;
 }

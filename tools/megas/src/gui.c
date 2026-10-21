@@ -44,10 +44,12 @@ typedef struct {
     struct nk_context *ctx;
     struct nk_rect viewport, picture;
     int width, height, alive, focused, tab, settings_tab, advanced_settings, res_selected;
-    int ram, vm_w, vm_h, passwordless, disk_gb, create_dialog, creating_disk;
+    int ram, vm_w, vm_h, passwordless, disk_gb, create_dialog, creating_disk, bus_selected;
+    int ram_dirty, bus_dirty, profile_missing;
+    char preflight_disk[1024];
     int password_field_visible;
     float row;
-    char qemu[1024], disk[1024], iso[1024], checkpoint[64];
+    char qemu[1024], disk[1024], iso[1024], checkpoint[64], bus[16];
     char username[128], password[256];
     struct nk_rect password_bounds;
     char new_disk[1024];
@@ -83,6 +85,8 @@ typedef struct {
     unsigned char file_dirs[GUI_MAX_FILES];
 #endif
 } MgGui;
+static const char *gui_bus_names[] = {"ide", "virtio", "scsi", "nvme"};
+static const char gui_bus_items[] = "ide\0virtio\0scsi\0nvme\0";
 
 static int gui_turkish(void)
 {
@@ -178,10 +182,91 @@ static void gui_named(MgGui *ui, const char *action, const char *name)
     gui_queue(ui, request);
 }
 
+static const char *gui_field_start(const char *text, const char *key)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    return strstr(text, needle);
+}
+
+static int gui_field_int(const char *text, const char *key, int fallback)
+{
+    const char *field = gui_field_start(text, key);
+    int value = 0, digits = 0;
+    if (!field) return fallback;
+    field += strlen(key) + 2;
+    while (*field == ' ') ++field;
+    while (*field >= '0' && *field <= '9' && value < 100000000) {
+        value = value * 10 + (*field - '0'); ++field; digits = 1;
+    }
+    return digits ? value : fallback;
+}
+
+static int gui_field_bool(const char *text, const char *key, int fallback)
+{
+    const char *field = gui_field_start(text, key);
+    if (!field) return fallback;
+    field += strlen(key) + 2;
+    return !strncmp(field, "true", 4);
+}
+
+static int gui_field_text(const char *text, const char *key, char *out, size_t cap)
+{
+    const char *field = gui_field_start(text, key);
+    size_t used = 0;
+    if (!field) return 0;
+    field += strlen(key) + 2;
+    if (*field != '"') return 0;
+    ++field;
+    while (*field && *field != '"' && used + 1 < cap) {
+        if (*field == '\\' && field[1]) ++field;
+        out[used++] = *field++;
+    }
+    out[used] = 0;
+    return 1;
+}
+
+/* An existing VM keeps its own memory and disk bus. Before a start the
+ * selected disk is asked of the controller, so the form shows the recorded
+ * values instead of silently substituting its own defaults. */
+static void gui_profile_sync(MgGui *ui)
+{
+    char request[1200], path[1024], value[64], answer[65536];
+    int ram;
+    if (!strcmp(ui->disk, ui->preflight_disk)) return;
+    if (!json_string(path, sizeof(path), ui->disk)) return;
+    snprintf(request, sizeof(request), "{\"action\":\"preflight\",\"disk\":%s}", path);
+    ui->preflight_disk[0] = 0;
+    (void)mg_engine_submit(ui->engine, request, answer, sizeof(answer));
+    gui_wipe(request, sizeof(request));
+    if (!gui_field_start(answer, "profile_known")) return;
+    snprintf(ui->preflight_disk, sizeof(ui->preflight_disk), "%s", ui->disk);
+    if (gui_field_bool(answer, "profile_known", 0)) {
+        ram = gui_field_int(answer, "memory_mb", 0);
+        if (ram >= 64 && ram <= 32768) ui->ram = ram;
+        if (gui_field_text(answer, "bus", value, sizeof(value))) {
+            int i;
+            for (i = 0; i < 4; ++i) if (!strcmp(value, gui_bus_names[i])) ui->bus_selected = i;
+            snprintf(ui->bus, sizeof(ui->bus), "%s", gui_bus_names[ui->bus_selected]);
+        }
+        ui->ram_dirty = ui->bus_dirty = ui->profile_missing = 0;
+    } else {
+        /* Unknown profile: only a disk image that already exists can hide a
+         * different memory or controller, so that case waits for an answer. */
+        ui->profile_missing = ui->disk[0] && gui_field_bool(answer, "image_exists", 0);
+    }
+}
+
 static void gui_start(MgGui *ui)
 {
     char qemu[6144], disk[6144], iso[6144], username[768], password[1536], request[22000];
     const MgStatus *status = mg_engine_status(ui->engine);
+    gui_profile_sync(ui);
+    if (ui->profile_missing && !ui->ram_dirty && !ui->bus_dirty) {
+        gui_note(ui, tr("Bu diskin kayıtlı belleği ve disk yolu yok; mevcut bir disk sessizce yeniden bağlanmaz. Ayarlar'dan VM belleğini ve disk yolunu (bus) VM'in orijinal değerleriyle seçin.",
+                        "This disk has no recorded memory or disk bus, and an existing disk is never reattached silently. In Settings set VM memory and disk bus to the VM's original values, then start again."));
+        return;
+    }
     if (!ui->passwordless && !ui->password[0] && !status->owned_pid) {
         gui_note(ui, tr("Yeni VM için şifresiz oturumu seçin veya yeni bir misafir şifresi girin.",
                         "For a new VM, choose passwordless login or enter a new guest password."));
@@ -214,13 +299,13 @@ static void gui_start(MgGui *ui)
     if (!ui->passwordless && ui->password[0]) {
         snprintf(request, sizeof(request),
             "{\"action\":\"start\",\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"username\":%s,"
-            "\"password\":%s,\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"passwordless\":false}",
-            qemu, disk, iso, username, password, ui->ram, ui->vm_w, ui->vm_h);
+            "\"password\":%s,\"ram_mb\":%d,\"bus\":\"%s\",\"width\":%d,\"height\":%d,\"passwordless\":false}",
+            qemu, disk, iso, username, password, ui->ram, ui->bus, ui->vm_w, ui->vm_h);
     } else {
         snprintf(request, sizeof(request),
             "{\"action\":\"start\",\"qemu\":%s,\"disk\":%s,\"iso\":%s,\"username\":%s,"
-            "\"ram_mb\":%d,\"width\":%d,\"height\":%d,\"passwordless\":%s}",
-            qemu, disk, iso, username, ui->ram, ui->vm_w, ui->vm_h,
+            "\"ram_mb\":%d,\"bus\":\"%s\",\"width\":%d,\"height\":%d,\"passwordless\":%s}",
+            qemu, disk, iso, username, ui->ram, ui->bus, ui->vm_w, ui->vm_h,
             ui->passwordless ? "true" : "false");
     }
     if (gui_queue(ui, request)) gui_password_clear(ui);
@@ -738,8 +823,21 @@ static void gui_settings(MgGui *ui)
                "Use the program selected by Megas for normal use."), ui->qemu, 3);
     }
     nk_layout_row_dynamic(ctx, ui->row, 1);
-    nk_property_int(ctx, tr("VM belleği (MB)", "VM memory (MB)"), 64, &ui->ram, 32768, 64, 16);
-    if (nk_widget_is_hovered(ctx)) nk_tooltip(ctx, tr("Bu bellek VM'e aittir. Kontrol panelinin belleğinden ayrıdır.", "This memory belongs to the VM, separately from the controller."));
+    {
+        int previous = ui->ram;
+        nk_property_int(ctx, tr("VM belleği (MB)", "VM memory (MB)"), 64, &ui->ram, 32768, 64, 16);
+        if (ui->ram != previous) ui->ram_dirty = 1;
+    }
+    if (nk_widget_is_hovered(ctx)) nk_tooltip(ctx, tr("Bu bellek VM'e aittir. Kayıtlı bir profil varsa değer olduğu gibi korunur; yalnızca siz değiştirdiğinizde değişir.",
+                                                     "This memory belongs to the VM. A recorded profile keeps its exact value; it changes only when you change it."));
+    nk_layout_row_dynamic(ctx, ui->row, 1);
+    {
+        int previous = ui->bus_selected;
+        ui->bus_selected = nk_combo_string(ctx, gui_bus_items, ui->bus_selected, 4, (int)ui->row, nk_vec2(220, 180));
+        if (ui->bus_selected != previous) ui->bus_dirty = 1;
+    }
+    snprintf(ui->bus, sizeof(ui->bus), "%s", gui_bus_names[ui->bus_selected]);
+    if (nk_widget_is_hovered(ctx)) nk_tooltip(ctx, tr("Mevcut diskin denetleyicisiyle aynı olmalı. IDE diski virtio'ya bağlamak sistemi bozar.", "Must match the existing disk controller. Attaching an IDE disk to virtio breaks the guest."));
     nk_layout_row_dynamic(ctx, ui->row, 1);
     nk_label(ctx, tr("Ekran Çözünürlüğü Seçici", "Resolution Selector"), NK_TEXT_LEFT);
     {
@@ -1179,7 +1277,12 @@ static void gui_execute_pending(MgGui *ui)
     gui_note(ui,status->feedback);
     if (refresh_history) gui_history(ui);
     if (ui->creating_disk) {
-        if (!result) snprintf(ui->disk,sizeof(ui->disk),"%s",ui->new_disk);
+        if (!result) {
+            /* A disk this GUI just created is a new VM: its form values stand. */
+            snprintf(ui->disk,sizeof(ui->disk),"%s",ui->new_disk);
+            snprintf(ui->preflight_disk,sizeof(ui->preflight_disk),"%s",ui->disk);
+            ui->profile_missing = 0;
+        }
         ui->creating_disk=0;
     }
 }
@@ -1465,6 +1568,11 @@ int mg_gui_run(MgEngine *engine)
     snprintf(ui->username,sizeof(ui->username),"megas");
     snprintf(ui->checkpoint,sizeof(ui->checkpoint),"step-1");
     ui->ram=(int)config->ram_mb;ui->vm_w=(int)config->width;ui->vm_h=(int)config->height;
+    if (!ui->ram) ui->ram = 256; /* only for a new VM; an existing disk replaces it below */
+    snprintf(ui->bus, sizeof(ui->bus), "%s", config->disk_bus[0] ? config->disk_bus : "virtio");
+    ui->bus_selected = 1;
+    for (int i = 0; i < 4; ++i) if (!strcmp(ui->bus, gui_bus_names[i])) ui->bus_selected = i;
+    gui_profile_sync(ui);
     ui->passwordless=config->passwordless;ui->disk_gb=16;
     for (int i = 1; i < RES_PRESETS_COUNT; ++i) {
         if (res_presets[i].w == ui->vm_w && res_presets[i].h == ui->vm_h) {

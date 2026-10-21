@@ -11,6 +11,8 @@ typedef struct {
     char disk[1024];
     char iso[1024];
     char seed_iso[1024];
+    char disk_bus[16];
+    char video[64];
     unsigned ram_mb, width, height;
     unsigned qmp_port, vnc_port, control_port;
     unsigned qga_port;

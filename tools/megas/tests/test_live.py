@@ -338,7 +338,7 @@ def main():
             require(second.returncode != 0, 'Second owner was allowed in the same runtime')
             passed('one_owner_per_runtime')
             response = send({'action': 'start', 'disk': str(disk), 'qemu': qemu,
-                             'ram_mb': 64, 'width': 800, 'height': 600})
+                             'ram_mb': 64, 'bus': 'virtio', 'width': 800, 'height': 600})
             wait_for(lambda: send({'action': 'status'})['state'].get('frame_generation', 0) > 0,
                      'Live RFB framebuffer was not received', seconds=15)
             response = send({'action': 'status'})
@@ -601,7 +601,7 @@ def main():
             wait_for(lambda: send({'action': 'status'}).get('ok'),
                      'Replacement owner did not start')
             send({'action': 'start', 'disk': str(disk), 'qemu': qemu,
-                  'ram_mb': 64, 'width': 800, 'height': 600})
+                  'ram_mb': 64, 'bus': 'virtio', 'width': 800, 'height': 600})
             wait_for(lambda: send({'action': 'status'})['state'].get('frame_generation', 0) > 0,
                      'Replacement owner did not receive the live framebuffer', seconds=15)
             restarted_status = send({'action': 'status'})
@@ -683,7 +683,7 @@ def main():
             wait_for(lambda: not pid_alive(owned_pid), 'Managed stop orphaned QEMU')
             passed('managed_stop_reaps_qemu_child')
             # Relaunch then kill the owner gracefully: cleanup must also reap this child.
-            send({'action': 'start', 'disk': str(disk), 'qemu': qemu, 'ram_mb': 64})
+            send({'action': 'start', 'disk': str(disk), 'qemu': qemu, 'ram_mb': 64, 'bus': 'virtio'})
             owned_pid = send({'action': 'status'})['state']['owned_pid']
             owner.terminate()
             owner.wait(timeout=10)
