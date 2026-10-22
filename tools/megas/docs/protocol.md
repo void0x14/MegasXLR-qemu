@@ -1,7 +1,11 @@
 # Native control contract
 
 One owner process runs the GUI or `megas serve`. Native clients use loopback
-TCP and newline-delimited JSON. Every command response includes current state,
+TCP and newline-delimited JSON. The stdio adapter (`megas agent`) starts that
+owner itself when no owner answers on its port, then retries the request once;
+the owner is detached, so it outlives the adapter and the next adapter reuses
+it. An owner that is already running, GUI or `serve`, is never replaced. Every
+command response includes current state,
 the latest live image path and a readable fallback. The continuous RFB connection
 is independent of screenshots; screenshots are optional exports from its buffer.
 

@@ -225,6 +225,32 @@ int mgp_executable_dir(char *out, size_t capacity)
     return -1;
 #endif
 }
+int mgp_self_path(char *out, size_t capacity)
+{
+    if (!out || capacity < 2) return -1;
+    out[0] = 0;
+#ifdef _WIN32
+    {
+        wchar_t path[32768];
+        DWORD length = GetModuleFileNameW(NULL, path, (DWORD)(sizeof(path) / sizeof(path[0])));
+        if (!length || length >= sizeof(path) / sizeof(path[0])) return -1;
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path, -1,
+                                 out, (int)capacity, NULL, NULL)) return -1;
+        return 0;
+    }
+#elif defined(__linux__)
+    {
+        char path[4096];
+        ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);
+        if (length <= 0 || (size_t)length >= sizeof(path) ||
+            (size_t)length >= capacity) return -1;
+        memcpy(out, path, (size_t)length + 1);
+        return 0;
+    }
+#else
+    return -1;
+#endif
+}
 uint64_t mgp_now(void)
 {
 #ifdef _WIN32
@@ -583,6 +609,90 @@ fail:
     return -1;
 #endif
 }
+int mgp_spawn_detached(MgpProcess *process, char *const argv[], const char *logpath,
+                       char *error, size_t capacity)
+{
+    process->exit_code = -1;
+#ifdef _WIN32
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION pi;
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+    wchar_t *wide_log = utf16(logpath), *wide_command;
+    HANDLE log = INVALID_HANDLE_VALUE, input = INVALID_HANDLE_VALUE;
+    char command[32768];
+    size_t used = 0, i;
+    if (!wide_log) goto fail;
+    log = CreateFileW(wide_log, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                      &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wide_log);
+    input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (log == INVALID_HANDLE_VALUE || input == INVALID_HANDLE_VALUE) goto fail;
+    memset(&startup, 0, sizeof(startup)); startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = input; startup.hStdOutput = log; startup.hStdError = log;
+    for (i = 0; argv[i]; i++) {
+        if (i) {
+            if (used + 1 >= sizeof(command)) goto fail;
+            command[used++] = ' ';
+        }
+        if (quote_arg(command, sizeof(command), &used, argv[i])) goto fail;
+    }
+    command[used] = 0;
+    wide_command = utf16(command);
+    if (!wide_command || !CreateProcessW(NULL, wide_command, NULL, NULL, TRUE,
+                            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                            NULL, NULL, &startup, &pi)) {
+        free(wide_command); goto fail;
+    }
+    free(wide_command);
+    /* No job object and no retained handle: the owner is not tied to us. */
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    CloseHandle(log); CloseHandle(input);
+    process->handle = NULL; process->job = NULL; process->pid = pi.dwProcessId;
+    return 0;
+fail:
+    if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+    if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
+    snprintf(error, capacity, "Program could not start (Windows code %lu). Repair prompt contains the log path.", GetLastError());
+    return -1;
+#else
+    int pipefd[2], child_error = 0, log, devnull;
+    pid_t pid;
+    process->pid = 0; process->group = 0;
+    process->host_pid = 0; process->host_scan_ms = 0;
+    if (pipe(pipefd)) goto fail;
+    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC); fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+    log = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (log < 0) { close(pipefd[0]); close(pipefd[1]); goto fail; }
+    pid = fork();
+    if (pid == 0) {
+        close(pipefd[0]);
+        if (setsid() < 0) spawn_child_fail(pipefd[1], errno);
+        devnull = open("/dev/null", O_RDONLY);
+        if (devnull < 0 || dup2(devnull, STDIN_FILENO) < 0) {
+            spawn_child_fail(pipefd[1], errno);
+        }
+        if (dup2(log, STDOUT_FILENO) < 0 || dup2(log, STDERR_FILENO) < 0) {
+            spawn_child_fail(pipefd[1], errno);
+        }
+        if (devnull > STDERR_FILENO) close(devnull);
+        if (log > STDERR_FILENO) close(log);
+        execvp(argv[0], argv);
+        spawn_child_fail(pipefd[1], errno);
+    }
+    close(log); close(pipefd[1]);
+    if (pid < 0) { close(pipefd[0]); goto fail; }
+    while (read(pipefd[0], &child_error, sizeof(child_error)) < 0 && errno == EINTR) { }
+    close(pipefd[0]);
+    if (child_error) { waitpid(pid, NULL, 0); errno = child_error; goto fail; }
+    process->pid = pid; process->group = pid;
+    return 0;
+fail:
+    snprintf(error, capacity, "Program could not start: %s. Repair prompt contains the log path.", strerror(errno));
+    return -1;
+#endif
+}
 int mgp_spawn(MgpProcess *process, char *const argv[], const char *logpath,
               char *error, size_t capacity)
 {
@@ -764,6 +874,32 @@ int mgp_owner_lock(const char *path, intptr_t *lock)
     *lock = fd;
 #endif
     return 0;
+}
+int mgp_owner_mark(intptr_t lock, unsigned long pid)
+{
+    char text[32];
+    int length = snprintf(text, sizeof(text), "%lu\n", pid);
+    if (length <= 0 || (size_t)length >= sizeof(text)) return -1;
+#ifdef _WIN32
+    {
+        DWORD written = 0;
+        if (SetFilePointer((HANDLE)lock, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER &&
+            GetLastError() != NO_ERROR) return -1;
+        if (!SetEndOfFile((HANDLE)lock)) return -1;
+        if (!WriteFile((HANDLE)lock, text, (DWORD)length, &written, NULL) ||
+            written != (DWORD)length) return -1;
+        return 0;
+    }
+#else
+    if (ftruncate((int)lock, 0) || lseek((int)lock, 0, SEEK_SET) < 0) return -1;
+    {
+        ssize_t written;
+        do { written = write((int)lock, text, (size_t)length); }
+        while (written < 0 && errno == EINTR);
+        if (written != (ssize_t)length) return -1;
+    }
+    return 0;
+#endif
 }
 void mgp_owner_unlock(intptr_t lock)
 {

@@ -237,51 +237,67 @@ static int unsigned_span(Span value, unsigned long long *result)
 }
 
 /* Poll the owner for at most 1.5 seconds. The owner runs OCR as an isolated
- * bounded child, so this wait never blocks its GUI/event loop. */
+ * bounded child, so this wait never blocks its GUI/event loop.
+ *
+ * The owner captures the frame itself when no generation is named, so a
+ * scrolling screen cannot invalidate the request before OCR starts. A screen
+ * that animates (a blinking cursor is enough) still advances its generation
+ * while Tesseract works; that text belongs to the generation it was captured
+ * from, so it is returned with that generation and flagged as stale instead of
+ * being thrown away. Text for an older generation than the caller was shown is
+ * never presented as the current screen. */
 static int auto_ocr(unsigned port, const char *reply, char *text, size_t text_cap,
-                    char *message, size_t message_cap, unsigned long long *generation)
+                    char *message, size_t message_cap, unsigned long long *generation,
+                    int *stale)
 {
-    char request[128], owner_reply[AGENT_REPLY_MAX];
-    Span all = { reply, reply + strlen(reply) }, target_span, state, ocr, status, value, image_gen, ocr_gen;
+    char owner_reply[AGENT_REPLY_MAX];
+    Span all = { reply, reply + strlen(reply) }, target_span;
     unsigned long long target;
     uint64_t deadline;
     int calls = 0;
     text[0] = message[0] = 0;
+    if (stale) { *stale = 0; }
     if (!property(all, "image_generation", &target_span) ||
         unsigned_span(target_span, &target)) {
         snprintf(message, message_cap, "No current live image generation is available; OCR was not run.");
         return 0;
     }
     *generation = target;
-    snprintf(request, sizeof(request), "{\"action\":\"ocr\",\"generation\":%llu}", target);
-    if (mg_client(port, request, owner_reply, sizeof(owner_reply))) {
+    if (mg_client(port, "{\"action\":\"ocr\"}", owner_reply, sizeof(owner_reply))) {
+        /* A refused request still carries the owner's own reason, which is more
+         * useful than calling it unreachable. */
+        Span refused = { owner_reply, owner_reply + strlen(owner_reply) }, part, value;
+        if (property(refused, "ocr", &part) && property(part, "message", &value) &&
+            decode(value, message, message_cap) && message[0]) return 0;
+        if (property(refused, "fallback_text", &value) &&
+            decode(value, message, message_cap) && message[0]) return 0;
         snprintf(message, message_cap, "OCR request could not reach the native owner; only controller metadata is available.");
         return 0;
     }
     deadline = mgp_now() + 1500;
-    do {
+    for (;;) {
         Span current = { owner_reply, owner_reply + strlen(owner_reply) };
+        Span state, ocr, status, value, ocr_gen;
+        unsigned long long ocr_number = 0;
+        int usable = 0;
         if (property(current, "state", &state) && property(current, "ocr", &ocr) &&
-            property(ocr, "status", &status) && property(current, "image_generation", &image_gen) &&
-            property(ocr, "generation", &ocr_gen)) {
-            unsigned long long image_number = 0, ocr_number = 0;
-            if (!unsigned_span(image_gen, &image_number) && !unsigned_span(ocr_gen, &ocr_number) &&
-                image_number == target && ocr_number == target) {
-                if (equals(status, "complete")) {
-                    if (property(ocr, "text", &value) && decode(value, text, text_cap)) {
-                        if (property(ocr, "message", &value)) (void)decode(value, message, message_cap);
-                        return 1;
-                    }
-                    snprintf(message, message_cap, "OCR completed, but its text result exceeded the adapter limit.");
-                    return 0;
-                }
-                if (!equals(status, "running")) {
-                    if (property(ocr, "message", &value) && decode(value, message, message_cap)) return 0;
-                    snprintf(message, message_cap, "OCR is unavailable or did not complete; no screen text was inferred.");
-                    return 0;
-                }
-            } else {
-                snprintf(message, message_cap, "The display changed during OCR; extracted text was discarded as stale.");
+            property(ocr, "status", &status) && property(ocr, "generation", &ocr_gen) &&
+            !unsigned_span(ocr_gen, &ocr_number)) {
+            usable = property(ocr, "text", &value) && decode(value, text, text_cap) && text[0];
+            if ((equals(status, "complete") || equals(status, "stale_image")) &&
+                usable && ocr_number >= target) {
+                *generation = ocr_number;
+                if (property(ocr, "message", &value)) (void)decode(value, message, message_cap);
+                if (stale && equals(status, "stale_image")) { *stale = 1; }
+                return 1;
+            }
+            if (!equals(status, "running")) {
+                if (property(ocr, "message", &value) && decode(value, message, message_cap) && message[0]) return 0;
+                snprintf(message, message_cap, "OCR is unavailable or did not complete; no screen text was inferred.");
+                return 0;
+            }
+            if (usable && ocr_number < target) {
+                snprintf(message, message_cap, "The owner still reports text for an older image generation; no text was inferred for this screen.");
                 return 0;
             }
         }
@@ -290,7 +306,7 @@ static int auto_ocr(unsigned port, const char *reply, char *text, size_t text_ca
         calls++;
         if (calls > 15) break;
         if (mg_client(port, "{\"action\":\"status\"}", owner_reply, sizeof(owner_reply))) break;
-    } while (mgp_now() < deadline);
+    }
     snprintf(message, message_cap, "OCR is still running or unavailable within the 1.5-second adapter wait; no screen text was inferred.");
     return 0;
 }
@@ -301,8 +317,9 @@ static void tool_result(unsigned port, Span id, const char *reply, int vision, i
     FILE *f = open_image(reply);
     char ocr_text[8192] = {0}, ocr_message[512] = {0}, combined[8704];
     unsigned long long generation = 0;
+    int stale = 0;
     int has_ocr = f && auto_ocr(port, reply, ocr_text, sizeof(ocr_text),
-                                ocr_message, sizeof(ocr_message), &generation);
+                                ocr_message, sizeof(ocr_message), &generation, &stale);
     if (property(all, "ok", &ok) && ok.b - ok.a == 5 &&
         !memcmp(ok.a, "false", 5)) { failure = 1; }
     prefix(id);
@@ -315,6 +332,15 @@ static void tool_result(unsigned port, Span id, const char *reply, int vision, i
         fputs(",{\"type\":\"text\",\"text\":", stdout);
         quoted(combined);
         putchar('}');
+        if (stale) {
+            char note[160];
+            snprintf(note, sizeof(note),
+                     "The display advanced after this capture; the text above describes image generation %llu, not the newest frame.",
+                     generation);
+            fputs(",{\"type\":\"text\",\"text\":", stdout);
+            quoted(note);
+            putchar('}');
+        }
     } else if (f) {
         fputs(",{\"type\":\"text\",\"text\":", stdout);
         quoted(ocr_message[0] ? ocr_message : "OCR unavailable; controller metadata is not screen text.");
@@ -333,6 +359,113 @@ static void list_tools(Span id)
     prefix(id);
     fputs(",\"result\":{\"tools\":[{\"name\":\"megas_vm\",\"title\":\"Control the VM\",\"description\":\"Native VM control. Every result includes actual live state and the latest display image when available. Default agent mode returns PNG plus bounded Tesseract OCR text when OCR is available; --text-only returns actual OCR text or an honest unavailable message. Commands are audited; a confirmed checkpoint can be restored. Run preflight for an existing disk before start and reuse its recorded RAM, bus and video: the VM's memory and disk controller belong to the VM, so start is refused while they are unknown and the refusal names what to ask the user. Never silently change them. Use status to inspect and repair for the forensic repair prompt. Never infer success from a requested action.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"preflight, start, status, pause, resume, stop, reset, key, click, type, resize, screenshot, checkpoint, restore, steps, password, doom, ocr, harness, repair\"},\"disk\":{\"type\":\"string\",\"description\":\"VM disk image path. For an existing disk run preflight first and reuse the recorded RAM and bus.\"},\"ram_mb\":{\"type\":\"integer\",\"minimum\":16,\"maximum\":32768,\"description\":\"VM RAM in MiB. Use the memory the VM already has, from preflight. Change it only when the user asks or the task needs more memory; there is no default.\"},\"bus\":{\"type\":\"string\",\"enum\":[\"ide\",\"virtio\",\"scsi\",\"nvme\"],\"description\":\"Disk controller bus. It must match the VM's existing disk; an existing disk is never reattached to a different bus.\"},\"video\":{\"type\":\"string\",\"description\":\"Display device, for example VGA or virtio-vga. Reuse the VM's existing device unless the user asks to change it.\"},\"iso\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"key\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"width\":{\"type\":\"integer\"},\"height\":{\"type\":\"integer\"},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},\"enabled\":{\"type\":\"boolean\"},\"username\":{\"type\":\"string\"},\"password\":{\"type\":\"string\"},\"wad\":{\"type\":\"string\"}},\"required\":[\"action\"],\"additionalProperties\":true}}]}}\n", stdout);
     fflush(stdout);
+}
+
+/* A harness launches this adapter and nothing else, so the adapter owns the
+ * lifecycle of the controller it speaks to. When no owner answers on the
+ * configured port, the adapter starts one in this session's runtime folder
+ * and retries the action once. The owner is detached: it outlives the adapter,
+ * so a VM keeps running across harness restarts, and a later adapter reuses
+ * it instead of starting a second one (the owner lock admits one). */
+static int escape_reply(char *out, size_t capacity, const char *text)
+{
+    size_t n = 0;
+    if (!capacity) return -1;
+    for (; *text; text++) {
+        unsigned char c = (unsigned char)*text;
+        if (c == '"' || c == '\\') {
+            if (n + 2 >= capacity) return -1;
+            out[n++] = '\\'; out[n++] = (char)c;
+        } else if (c < 32) {
+            if (n + 6 >= capacity) return -1;
+            n += (size_t)snprintf(out + n, capacity - n, "\\u%04x", c);
+        } else {
+            if (n + 1 >= capacity) return -1;
+            out[n++] = (char)c;
+        }
+    }
+    out[n] = 0;
+    return 0;
+}
+
+static int owner_answers(unsigned port)
+{
+    /* A status answer is a few kilobytes of verified state; a smaller reply
+     * buffer truncates it and turns every successful probe into a parse
+     * failure. */
+    static char probe[AGENT_REPLY_MAX];
+    return mg_client(port, "{\"action\":\"status\"}", probe, sizeof(probe)) == 0;
+}
+
+static int owner_wants_gui(void)
+{
+    char mode[32], display[256];
+    if (!mgp_env("MEGAS_OWNER_MODE", mode, sizeof(mode))) {
+        if (!strcmp(mode, "serve")) return 0;
+        if (!strcmp(mode, "gui")) return 1;
+    }
+    if (!mgp_env("DISPLAY", display, sizeof(display)) && display[0]) return 1;
+    if (!mgp_env("WAYLAND_DISPLAY", display, sizeof(display)) && display[0]) return 1;
+    return 0;
+}
+
+static int owner_start(unsigned port, char *note, size_t capacity)
+{
+    const char *commands[2];
+    MgConfig cfg;
+    MgpProcess process;
+    char self[1024], log[1200], port_text[16], error[512], *argv[8];
+    unsigned count = 0, attempt;
+    mg_config_defaults(&cfg);
+    snprintf(log, sizeof(log), "%.900s/owner-adapter.log", cfg.runtime_dir);
+    if (mgp_self_path(self, sizeof(self))) {
+        snprintf(note, capacity, "The adapter could not resolve its own executable path.");
+        return -1;
+    }
+    if (mgp_mkdir(cfg.runtime_dir)) {
+        snprintf(note, capacity, "The runtime folder %.300s could not be created.", cfg.runtime_dir);
+        return -1;
+    }
+    if (owner_wants_gui()) commands[count++] = "gui";
+    commands[count++] = "serve";
+    snprintf(port_text, sizeof(port_text), "%u", port);
+    argv[0] = self; argv[1] = "--runtime"; argv[2] = cfg.runtime_dir;
+    argv[3] = "--port"; argv[4] = port_text; argv[5] = NULL; argv[6] = NULL;
+
+    for (attempt = 0; attempt < count; attempt++) {
+        char token_path[1024];
+        unsigned waited;
+        snprintf(token_path, sizeof(token_path), "%.900s/session-%u.token", cfg.runtime_dir, port);
+        argv[5] = (char *)commands[attempt];
+        if (mgp_spawn_detached(&process, argv, log, error, sizeof(error))) {
+            snprintf(note, capacity, "The native owner could not start: %.260s", error);
+            continue;
+        }
+        /* Waiting for the session credential first keeps the journal free of
+         * probes that could only answer "no owner yet". */
+        for (waited = 0; waited < 120; waited++) {
+            if (mgp_file_size(token_path) == 64 && owner_answers(port)) return 1;
+            if (!mgp_alive(&process)) break;
+            mgp_sleep(50);
+        }
+        mgp_reap(&process);
+        if (waited == 120) {
+            snprintf(note, capacity,
+                     "A native owner is running but did not answer within six seconds; %.400s holds its output.", log);
+            return -1;
+        }
+        /* That owner exited before answering: try the next one. */
+    }
+    snprintf(note, capacity, "No native owner could be started; %.400s holds the owner output.", log);
+    return -1;
+}
+
+/* mg_client states a missing owner in its own words; only those two failures
+ * mean "start one", never a refused or unanswered action. */
+static int owner_missing(const char *reply)
+{
+    return !reply[0] || strstr(reply, "Controller is not running") ||
+           strstr(reply, "controller is unreachable");
 }
 
 int mg_agent_stdio(unsigned port, int vision)
@@ -404,11 +537,21 @@ int mg_agent_stdio(unsigned port, int vision)
             reply[0] = 0;
             {
                 int failure = mg_client(port, request, reply, AGENT_REPLY_MAX);
-                if (failure && !reply[0]) {
-                    snprintf(reply, AGENT_REPLY_MAX,
-                             "{\"ok\":false,\"image_path\":\"\","
-                             "\"feedback\":\"The VM manager is unavailable.\","
-                             "\"repair_prompt\":\"Inspect the visible MegasXLR manager and its session journal. Restore its authenticated native control connection; keep existing VM disks and checkpoints.\"}");
+                if (failure && owner_missing(reply)) {
+                    char note[1024] = "", escaped[1200];
+                    if (owner_start(port, note, sizeof(note)) == 1) {
+                        failure = mg_client(port, request, reply, AGENT_REPLY_MAX);
+                    } else {
+                        if (escape_reply(escaped, sizeof(escaped), note)) {
+                            snprintf(escaped, sizeof(escaped), "The adapter could not report why the owner did not start.");
+                        }
+                        snprintf(reply, AGENT_REPLY_MAX,
+                                 "{\"ok\":false,\"image_path\":\"\","
+                                 "\"fallback_text\":\"No native owner answered this action and the adapter could not start one. %s\","
+                                 "\"repair_prompt\":\"Run 'megas serve' with the same --runtime folder and --port, or make the runtime folder writable and free localhost:%u, then retry. Existing VM disks and checkpoints are untouched.\"}",
+                                 escaped, port);
+                        failure = 1;
+                    }
                 }
                 tool_result(port, id, reply, vision, failure != 0);
             }

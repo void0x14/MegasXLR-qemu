@@ -22,6 +22,7 @@ typedef struct {
 #endif
 int mgp_init(void);
 int mgp_executable_dir(char *out, size_t capacity);
+int mgp_self_path(char *out, size_t capacity);
 FILE *mgp_fopen(const char *path, const char *mode);
 int mgp_remove(const char *path);
 int mgp_create_exclusive(const char *path);
@@ -43,6 +44,10 @@ int mgp_recv(MgpSocket socket, void *data, size_t length);
 int mgp_send(MgpSocket socket, const void *data, size_t length);
 int mgp_send_all(MgpSocket socket, const void *data, size_t length, unsigned timeout_ms);
 int mgp_spawn(MgpProcess *process, char *const argv[], const char *logpath, char *error, size_t capacity);
+/* Detached spawn: the child leads its own session and is not killed with this
+ * process, so a long-lived owner survives the adapter that started it. */
+int mgp_spawn_detached(MgpProcess *process, char *const argv[], const char *logpath,
+                       char *error, size_t capacity);
 int mgp_spawn_bounded(MgpProcess *process, char *const argv[], const char *logpath,
                       uint64_t memory_bytes, unsigned cpu_seconds,
                       char *error, size_t capacity);
@@ -53,6 +58,9 @@ void mgp_terminate(MgpProcess *process);
 void mgp_force_kill(MgpProcess *process);
 void mgp_reap(MgpProcess *process);
 int mgp_owner_lock(const char *path, intptr_t *lock);
+/* Records the owning process id in the locked file, so a session names its
+ * owner without a second registry. */
+int mgp_owner_mark(intptr_t lock, unsigned long pid);
 void mgp_owner_unlock(intptr_t lock);
 const char *mgp_real_qemu(const char *requested, char *out, size_t cap);
 #endif

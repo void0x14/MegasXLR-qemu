@@ -32,7 +32,12 @@
 #define SNAPSHOT_BUDGET_FLOOR (2ULL * 1024 * 1024 * 1024)
 #define FREE_RESERVE (512ULL * 1024 * 1024)
 #define COMMAND_MS 4500
-#define OCR_MEMORY_BYTES (48ULL * 1024 * 1024)
+/* Tesseract loads its language model, which alone is tens of megabytes, so a
+ * small budget stops every OCR rather than bounding it. The budget is
+ * configurable because the model size depends on the installed Tesseract. */
+#define OCR_MEMORY_DEFAULT_MB 256ULL
+#define OCR_MEMORY_MIN_MB 8ULL
+#define OCR_MEMORY_MAX_MB 4096ULL
 #define OCR_WALL_MS 10000
 #define OCR_TEXT_CAP 4096
 
@@ -122,7 +127,7 @@ struct MgEngine {
     char guest_auto_marker[1024];
 
     int ocr_active, ocr_status;
-    uint64_t ocr_generation, ocr_deadline, ocr_pid, ocr_peak_memory;
+    uint64_t ocr_generation, ocr_deadline, ocr_pid, ocr_peak_memory, ocr_memory_bytes;
     char ocr_text[4097], ocr_output[1024], ocr_log[1024], ocr_message[256];
 
     Snapshot snapshots[SNAPSHOT_CATALOG_CAP];
@@ -1269,6 +1274,19 @@ FILE *token;
     e=calloc(1,sizeof(*e));
 if(!e)return NULL;
 e->cfg=*cfg;
+    /* The OCR budget is read once, so the child, the watchdog and every
+     * message state the same number. */
+    {
+        char value[64];
+        unsigned long long megabytes = OCR_MEMORY_DEFAULT_MB;
+        if (!mgp_env("MEGAS_OCR_MEMORY_MB", value, sizeof(value)) && value[0]) {
+            char *end = NULL;
+            unsigned long long parsed = strtoull(value, &end, 10);
+            if (end && end != value && *end == 0 && parsed >= OCR_MEMORY_MIN_MB && parsed <= OCR_MEMORY_MAX_MB)
+                megabytes = parsed;
+        }
+        e->ocr_memory_bytes = megabytes * 1024ULL * 1024ULL;
+    }
     /* The configured disk and its memory are this controller's own VM:
      * record them so a later start never borrows another disk's memory. */
     snprintf(e->vm_disk,sizeof(e->vm_disk),"%s",cfg->disk);
@@ -1284,6 +1302,14 @@ e->owner_lock=-1;
     snprintf(path,sizeof(path),"%.900s/owner-%u.lock",cfg->runtime_dir,cfg->control_port);
 
     if(mgp_owner_lock(path,&e->owner_lock))goto fail;
+
+    /* The locked file names the process that owns this session, so an
+     * adapter that started the owner can report and stop the right one. */
+#ifdef _WIN32
+    (void)mgp_owner_mark(e->owner_lock,GetCurrentProcessId());
+#else
+    (void)mgp_owner_mark(e->owner_lock,(unsigned long)getpid());
+#endif
 
     e->listener=mgp_listen(cfg->control_port);
 if(e->listener==MGP_BAD_SOCKET)goto fail;
@@ -2086,13 +2112,18 @@ static int ocr_start(MgEngine *e, Json *j)
     if (data_dir[0]) {
         argv[5] = "--tessdata-dir"; argv[6] = data_dir; argv[7] = NULL;
     } else argv[5] = NULL;
-    if (journal(e, "ocr_start", "OCR child requested for the current live image generation; memory limit 48 MiB; CPU limit 8 seconds; wall deadline 10 seconds.")) {
+    {
+        char detail[192];
+        snprintf(detail, sizeof(detail), "OCR child requested for the current live image generation; memory limit %llu MiB; CPU limit 8 seconds; wall deadline 10 seconds.",
+                 (unsigned long long)(e->ocr_memory_bytes / (1024 * 1024)));
+        if (journal(e, "ocr_start", detail)) {
         snprintf(e->ocr_message, sizeof(e->ocr_message), "The journal is full; OCR was not started.");
         feedback(e, "%s", e->ocr_message);
         return -1;
+        }
     }
     if (mgp_spawn_bounded(&e->ocr_process, argv, e->ocr_log,
-                         OCR_MEMORY_BYTES, 8, error, sizeof(error))) {
+                         e->ocr_memory_bytes, 8, error, sizeof(error))) {
         e->ocr_status = OCR_UNAVAILABLE;
         snprintf(e->ocr_message, sizeof(e->ocr_message), "Tesseract OCR could not start: %.170s. No OCR text was inferred.", error);
         journal(e, "ocr_unavailable", "Tesseract process could not start within the native resource limits.");
@@ -2118,11 +2149,15 @@ static void ocr_tick(MgEngine *e)
     {
         uint64_t resident = mgp_memory_bytes(&e->ocr_process);
         if (resident > e->ocr_peak_memory) e->ocr_peak_memory = resident;
-        if (resident > OCR_MEMORY_BYTES) {
+        if (e->ocr_memory_bytes && resident > e->ocr_memory_bytes) {
+            char detail[192];
             ocr_cleanup(e, 1);
             e->ocr_status = OCR_FAILED;
-            snprintf(e->ocr_message, sizeof(e->ocr_message), "OCR exceeded its observed 48 MiB process-memory budget and was stopped; the VM remains live.");
-            journal(e, "ocr_memory_limit", "OCR child exceeded 48 MiB measured process memory; only the OCR child was stopped.");
+            snprintf(e->ocr_message, sizeof(e->ocr_message), "OCR exceeded its observed %llu MiB process-memory budget and was stopped; the VM remains live.",
+                     (unsigned long long)(e->ocr_memory_bytes / (1024 * 1024)));
+            snprintf(detail, sizeof(detail), "OCR child exceeded %llu MiB measured process memory; only the OCR child was stopped.",
+                     (unsigned long long)(e->ocr_memory_bytes / (1024 * 1024)));
+            journal(e, "ocr_memory_limit", detail);
             feedback(e, "%s", e->ocr_message);
             return;
         }
@@ -2142,7 +2177,8 @@ static void ocr_tick(MgEngine *e)
     e->ocr_pid = 0;
     if (code != 0 || mgp_file_size(e->ocr_output) > 65536) {
         e->ocr_status = OCR_FAILED;
-        snprintf(e->ocr_message, sizeof(e->ocr_message), "OCR did not produce a bounded successful result (exit %d, memory cap 48 MiB); no text was inferred.", code);
+        snprintf(e->ocr_message, sizeof(e->ocr_message), "OCR did not produce a bounded successful result (exit %d, memory cap %llu MiB); no text was inferred.",
+                 code, (unsigned long long)(e->ocr_memory_bytes / (1024 * 1024)));
         journal(e, "ocr_failed", "OCR exited unsuccessfully or exceeded its bounded text output; VM remains live.");
         (void)mgp_remove(e->ocr_output);
         feedback(e, "%s", e->ocr_message);
@@ -2816,7 +2852,13 @@ bstr(&b,e->status.phase);
     bfmt(&b,",\"generation\":%llu,\"pid\":%llu,\"peak_memory_bytes\":%llu,\"text\":",
          (unsigned long long)e->ocr_generation,(unsigned long long)e->ocr_pid,
          (unsigned long long)e->ocr_peak_memory);
-    bstr(&b,ocr_status==OCR_COMPLETE?e->ocr_text:"");
+    /* Tesseract's text stays available for the generation it was captured
+     * from, even after a later frame arrives: the generation is reported with
+     * it, so a reader knows exactly which image the text belongs to. Dropping
+     * it would make every animated screen (a blinking cursor is enough) report
+     * "no text" while a real, completed OCR result exists. */
+    bstr(&b,(ocr_status==OCR_COMPLETE||ocr_status==OCR_STALE)?e->ocr_text:"");
+    bfmt(&b,",\"stale\":%s",ocr_status==OCR_STALE?"true":"false");
     bput(&b,",\"message\":");bstr(&b,e->ocr_message);
     bput(&b,"},\"feedback\":");
 

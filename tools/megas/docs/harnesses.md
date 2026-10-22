@@ -15,12 +15,21 @@ megas agent
 `agent` native C içinde çalışan stdio araç bağlantısıdır. Destekleyen
 harness'e bağlandığında araç sonuçlarında metin ve PNG resim bloğu birlikte
 verilir. Görsel desteği olmayan bağlantı için `megas agent --text-only`
-kullanılır. Ek bir Python, Node veya Rust sunucusu açılmaz. Ayrı açık GUI
-veya `serve` sahibi gerekir; port ve çalışma klasörü ikisinde aynı olmalıdır.
+kullanılır. Ek bir Python, Node veya Rust sunucusu açılmaz.
+
+Araç bağlantısı sahibini kendisi kurar: port üzerinde yanıt veren bir sahip
+yoksa ilk araç çağrısı aynı çalışma klasöründe ve aynı portta native sahibi
+başlatır (`MEGAS_OWNER_MODE=serve` ile penceresiz, aksi halde görüntü varsa
+GUI, olmazsa `serve`) ve isteği bir kez yineler. Başlatılan sahip ayrı bir
+oturumda çalışır; harness kapansa da VM çalışmaya devam eder ve sonraki
+bağlantı aynı sahibi kullanır. Açık bir GUI veya `serve` varsa o kullanılır,
+ikinci bir sahip açılmaz; port ve çalışma klasörü her ikisinde aynı olmalıdır.
 
 Metin durumu motorun doğruladığı çalışma bilgilerini anlatır. `read_screen`
 eylemi güncel ekran için ayrı bir Tesseract OCR sonucu ister; çıktı OCR olarak
-etiketlenir ve bellek, süre ve metin boyutu sınırlarına tabidir. OCR
+etiketlenir ve bellek, süre ve metin boyutu sınırlarına tabidir. Canlı ekran
+OCR sürerken ilerlerse sonuç atılmaz: metin, ait olduğu görüntü nesli ile
+birlikte verilir ve son kareye göre eski olduğu ayrıca belirtilir. OCR
 kullanılamıyorsa Megas resimdeki yazıyı tahmin edilmiş metin diye sunmaz.
 Genel amaçlı harness'ler kesintisiz video algısı veya her karede düşünme
 sağlamaz. Sürekli ekran bağlantısı açık kalır; model resmi desteklediği araç
