@@ -1643,13 +1643,14 @@ Aml *aml_touuid(const char *uuid)
 Aml *aml_unicode(const char *str)
 {
     int i = 0;
+    size_t len = strlen(str);
     Aml *var = aml_bundle(0x11 /* BufferOp */, AML_BUFFER);
 
     do {
         build_append_byte(var->buf, str[i]);
         build_append_byte(var->buf, 0);
         i++;
-    } while (i <= strlen(str));
+    } while (i <= len);
 
     return var;
 }

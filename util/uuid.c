@@ -69,10 +69,13 @@ static bool qemu_uuid_is_valid(const char *str)
 {
     int i;
 
-    for (i = 0; i < strlen(str); i++) {
+    for (i = 0; i < 36; i++) {
         const char c = str[i];
+        if (c == '\0') {
+            return false;
+        }
         if (i == 8 || i == 13 || i == 18 || i == 23) {
-            if (str[i] != '-') {
+            if (c != '-') {
                 return false;
             }
         } else {
@@ -84,7 +87,7 @@ static bool qemu_uuid_is_valid(const char *str)
             return false;
         }
     }
-    return i == 36;
+    return str[i] == '\0';
 }
 
 int qemu_uuid_parse(const char *str, QemuUUID *uuid)
