@@ -80,8 +80,9 @@ static bool nvme_nguid_is_valid(const char *str)
 {
     int i;
     int digit_count = 0;
+    int len = strlen(str);
 
-    for (i = 0; i < strlen(str); i++) {
+    for (i = 0; i < len; i++) {
         const char c = str[i];
         if (qemu_isxdigit(c)) {
             digit_count++;
