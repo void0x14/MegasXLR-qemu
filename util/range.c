@@ -68,12 +68,12 @@ GList *range_list_insert(GList *list, Range *data)
 }
 
 static inline
-GList *append_new_range(GList *list, uint64_t lob, uint64_t upb)
+GList *prepend_new_range(GList *list, uint64_t lob, uint64_t upb)
 {
     Range *new = g_new0(Range, 1);
 
     range_set_bounds(new, lob, upb);
-    return g_list_append(list, new);
+    return g_list_prepend(list, new);
 }
 
 
@@ -88,14 +88,14 @@ void range_inverse_array(GList *in, GList **rev,
     }
 
     if (!l) {
-        out = append_new_range(out, low, high);
+        out = prepend_new_range(out, low, high);
         goto exit;
     }
     r = (Range *)l->data;
 
     /* first range lob is greater than min, insert a first range */
     if (range_lob(r) > low) {
-        out = append_new_range(out, low, MIN(range_lob(r) - 1, high));
+        out = prepend_new_range(out, low, MIN(range_lob(r) - 1, high));
     }
 
     /* insert a range in between each original range until we reach high */
@@ -106,8 +106,8 @@ void range_inverse_array(GList *in, GList **rev,
             goto exit;
         }
         if (range_compare(r, rn)) {
-            out = append_new_range(out, range_upb(r) + 1,
-                                   MIN(range_lob(rn) - 1, high));
+            out = prepend_new_range(out, range_upb(r) + 1,
+                                    MIN(range_lob(rn) - 1, high));
         }
     }
 
@@ -116,8 +116,8 @@ void range_inverse_array(GList *in, GList **rev,
 
     /* last range upb is less than max, insert a last range */
     if (range_upb(r) <  high) {
-        out = append_new_range(out, range_upb(r) + 1, high);
+        out = prepend_new_range(out, range_upb(r) + 1, high);
     }
 exit:
-    *rev = out;
+    *rev = g_list_reverse(out);
 }
