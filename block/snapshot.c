@@ -497,17 +497,28 @@ bdrv_all_get_snapshot_devices(bool has_devices, strList *devices,
                 error_setg(errp, "No block device node '%s'", devices->value);
                 return -1;
             }
-            bdrvs = g_list_append(bdrvs, bs);
+            /*
+             * Performance optimization: use g_list_prepend() instead of
+             * g_list_append() inside loops to prevent O(N^2) behavior,
+             * and reverse the list at the end.
+             */
+            bdrvs = g_list_prepend(bdrvs, bs);
             devices = devices->next;
         }
     } else {
         BlockDriverState *bs;
         BdrvNextIterator it;
         for (bs = bdrv_first(&it); bs; bs = bdrv_next(&it)) {
-            bdrvs = g_list_append(bdrvs, bs);
+            /*
+             * Performance optimization: use g_list_prepend() instead of
+             * g_list_append() inside loops to prevent O(N^2) behavior,
+             * and reverse the list at the end.
+             */
+            bdrvs = g_list_prepend(bdrvs, bs);
         }
     }
 
+    bdrvs = g_list_reverse(bdrvs);
     *all_bdrvs = g_steal_pointer(&bdrvs);
     return 0;
 }

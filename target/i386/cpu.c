@@ -8111,7 +8111,12 @@ static void x86_cpu_list(void)
         FeatureWordInfo *fw = &feature_word_info[i];
         for (j = 0; j < 64; j++) {
             if (fw->feat_names[j]) {
-                names = g_list_append(names, (gpointer)fw->feat_names[j]);
+                /*
+                 * Performance optimization: use g_list_prepend() instead of
+                 * g_list_append() inside loops to prevent O(N^2) behavior.
+                 * Since the list is sorted immediately after, the order doesn't matter.
+                 */
+                names = g_list_prepend(names, (gpointer)fw->feat_names[j]);
             }
         }
     }
